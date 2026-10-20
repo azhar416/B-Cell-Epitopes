@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from CFG import CFG
 from model import ProtBertForClassification
@@ -108,7 +109,12 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
     for epoch in range(cfg.EPOCHS):
         total_loss = 0.0
         example_count = 0
-        for batch in train_loader:
+        progress_bar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch + 1}/{cfg.EPOCHS}",
+            unit="batch",
+        )
+        for batch in progress_bar:
             labels = batch.pop("labels").to(device, non_blocking=True)
             inputs = {
                 key: value.to(device, non_blocking=True)
@@ -128,6 +134,10 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             batch_size = labels.size(0)
             total_loss += loss.item() * batch_size
             example_count += batch_size
+            progress_bar.set_postfix(
+                batch_loss=f"{loss.item():.4f}",
+                avg_loss=f"{total_loss / example_count:.4f}",
+            )
 
         epoch_loss = total_loss / example_count
         history.append({"epoch": epoch + 1, "train_loss": epoch_loss})
