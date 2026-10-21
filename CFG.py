@@ -13,6 +13,7 @@ class CFG:
         self.MODEL_NAME = "Rostlab/prot_bert"
         self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
+        self.USE_MULTI_GPU = True
 
         self.TEST_SIZE = 0.2
         self.BATCH_SIZE = 16

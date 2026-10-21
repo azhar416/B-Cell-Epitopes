@@ -67,6 +67,50 @@ def _make_loader(dataset, cfg, shuffle, device):
     )
 
 
+def _binary_metrics(targets, probabilities, threshold):
+    targets = np.concatenate(targets).astype(np.int64, copy=False)
+    probabilities = np.concatenate(probabilities)
+    predictions = probabilities >= threshold
+    positives = targets == 1
+    negatives = ~positives
+
+    true_positive = int(np.count_nonzero(predictions & positives))
+    true_negative = int(np.count_nonzero(~predictions & negatives))
+    false_positive = int(np.count_nonzero(predictions & negatives))
+    false_negative = int(np.count_nonzero(~predictions & positives))
+
+    positive_count = int(positives.sum())
+    negative_count = len(targets) - positive_count
+    if positive_count and negative_count:
+        order = np.argsort(probabilities, kind="mergesort")
+        sorted_probabilities = probabilities[order]
+        _, starts, counts = np.unique(
+            sorted_probabilities,
+            return_index=True,
+            return_counts=True,
+        )
+        ranks = np.empty(len(targets), dtype=np.float64)
+        for start, count in zip(starts, counts):
+            ranks[order[start : start + count]] = (
+                start + 1 + (count - 1) / 2
+            )
+        auc = (
+            ranks[positives].sum() - positive_count * (positive_count + 1) / 2
+        ) / (positive_count * negative_count)
+    else:
+        auc = float("nan")
+
+    precision = true_positive / max(true_positive + false_positive, 1)
+    recall = true_positive / max(positive_count, 1)
+    accuracy = (true_positive + true_negative) / max(len(targets), 1)
+    return {
+        "auc": float(auc),
+        "recall": recall,
+        "precision": precision,
+        "accuracy": accuracy,
+    }
+
+
 def train_model(train_dataset, cfg=None, model=None, device=None):
     """Train ProtBert on a prepared dataset and save the final checkpoint."""
     cfg = cfg or CFG()
@@ -83,6 +127,27 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
         model_name=cfg.MODEL_NAME,
         dropout=cfg.DROPOUT,
     )
+    if isinstance(model, nn.DataParallel):
+        model = model.module
+
+    device_ids = []
+    if (
+        cfg.USE_MULTI_GPU
+        and device.type == "cuda"
+        and torch.cuda.device_count() > 1
+    ):
+        primary_device = (
+            device.index
+            if device.index is not None
+            else torch.cuda.current_device()
+        )
+        device_ids = [primary_device] + [
+            index
+            for index in range(torch.cuda.device_count())
+            if index != primary_device
+        ]
+        device = torch.device("cuda", primary_device)
+
     model.to(device)
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
     criterion = BinaryFocalLoss(
@@ -104,11 +169,23 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
         weight_decay=cfg.WEIGHT_DECAY,
     )
 
+    if device_ids:
+        model = nn.DataParallel(
+            model,
+            device_ids=device_ids,
+            output_device=device_ids[0],
+        )
+        print(f"Training across {len(device_ids)} GPUs: {device_ids}")
+    else:
+        print(f"Training on {device}")
+
     history = []
     model.train()
     for epoch in range(cfg.EPOCHS):
         total_loss = 0.0
         example_count = 0
+        epoch_targets = []
+        epoch_probabilities = []
         progress_bar = tqdm(
             train_loader,
             desc=f"Epoch {epoch + 1}/{cfg.EPOCHS}",
@@ -134,20 +211,53 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             batch_size = labels.size(0)
             total_loss += loss.item() * batch_size
             example_count += batch_size
+            epoch_targets.append(labels.detach().cpu().numpy())
+            epoch_probabilities.append(probabilities.detach().cpu().numpy())
+            metrics = _binary_metrics(
+                epoch_targets,
+                epoch_probabilities,
+                cfg.PREDICTION_THRESHOLD,
+            )
             progress_bar.set_postfix(
                 batch_loss=f"{loss.item():.4f}",
                 avg_loss=f"{total_loss / example_count:.4f}",
+                auc=f"{metrics['auc']:.4f}",
+                recall=f"{metrics['recall']:.4f}",
+                precision=f"{metrics['precision']:.4f}",
+                accuracy=f"{metrics['accuracy']:.4f}",
             )
 
         epoch_loss = total_loss / example_count
-        history.append({"epoch": epoch + 1, "train_loss": epoch_loss})
-        print(f"Epoch {epoch + 1}/{cfg.EPOCHS} - train loss: {epoch_loss:.4f}")
+        metrics = _binary_metrics(
+            epoch_targets,
+            epoch_probabilities,
+            cfg.PREDICTION_THRESHOLD,
+        )
+        history.append(
+            {
+                "epoch": epoch + 1,
+                "train_loss": epoch_loss,
+                "train_auc": metrics["auc"],
+                "train_recall": metrics["recall"],
+                "train_precision": metrics["precision"],
+                "train_accuracy": metrics["accuracy"],
+            }
+        )
+        print(
+            f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
+            f"loss: {epoch_loss:.4f}, "
+            f"AUC: {metrics['auc']:.4f}, "
+            f"recall: {metrics['recall']:.4f}, "
+            f"precision: {metrics['precision']:.4f}, "
+            f"accuracy: {metrics['accuracy']:.4f}"
+        )
 
     checkpoint_path = Path(cfg.CHECKPOINT_PATH)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
     torch.save(
         {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": checkpoint_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "history": history,
             "model_name": cfg.MODEL_NAME,
