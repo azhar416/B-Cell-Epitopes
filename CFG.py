@@ -16,7 +16,7 @@ class CFG:
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True # True to freeze ProtBert encoder, False to fine-tune it
-        self.USE_LORA = False
+        self.USE_LORA = True # True to use LoRA, False to not use it
         self.LORA_RANK = 8
         self.LORA_ALPHA = 16
         self.LORA_DROPOUT = 0.1
