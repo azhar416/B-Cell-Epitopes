@@ -3,6 +3,7 @@ import pandas as pd
 
 class CFG:
     def __init__(self):
+        self.DEBUG = False
         self.SEED = 42
         self.DATASET_NAME = "bcell"
         self._DATASET_PATH = "/kaggle/input/datasets/daffamazhar/b-cell-epitope"
@@ -17,11 +18,11 @@ class CFG:
         self.FREEZE_ENCODER = True
 
         self.TEST_SIZE = 0.2
-        self.BATCH_SIZE = 16
-        self.EPOCHS = 3
-        self.ENCODER_LEARNING_RATE = 2e-5
+        self.BATCH_SIZE = 32
+        self.EPOCHS = 3 if self.DEBUG else 100
+        self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
         self.HEAD_LEARNING_RATE = 1e-4
-        self.WEIGHT_DECAY = 0.01
+        self.WEIGHT_DECAY = 0.001
         self.FOCAL_ALPHA = 0.75
         self.FOCAL_GAMMA = 2.0
         self.PREDICTION_THRESHOLD = 0.5
