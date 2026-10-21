@@ -1,6 +1,7 @@
 from pathlib import Path
 import random
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
@@ -47,6 +48,21 @@ class BinaryFocalLoss(nn.Module):
             self.gamma
         ) * binary_cross_entropy
         return loss.mean()
+
+
+def _build_loss_function(cfg):
+    loss_name = cfg.LOSS_FUNCTION.lower()
+    if loss_name == "bce":
+        return nn.BCELoss()
+    if loss_name == "binary_focal":
+        return BinaryFocalLoss(
+            alpha=cfg.FOCAL_ALPHA,
+            gamma=cfg.FOCAL_GAMMA,
+        )
+    raise ValueError(
+        "LOSS_FUNCTION must be either 'bce' or 'binary_focal'; "
+        f"received {cfg.LOSS_FUNCTION!r}."
+    )
 
 
 def set_seed(seed):
@@ -182,10 +198,7 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
 
     model.to(device)
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
-    criterion = BinaryFocalLoss(
-        alpha=cfg.FOCAL_ALPHA,
-        gamma=cfg.FOCAL_GAMMA,
-    )
+    criterion = _build_loss_function(cfg)
 
     encoder_parameters = [
         parameter
@@ -319,6 +332,7 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             "history": history,
             "model_name": cfg.MODEL_NAME,
             "dropout": cfg.DROPOUT,
+            "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,
             "use_lora": cfg.USE_LORA,
             "lora_rank": cfg.LORA_RANK if cfg.USE_LORA else None,
@@ -343,10 +357,7 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
     model.to(device)
     model.eval()
     test_loader = _make_loader(test_dataset, cfg, shuffle=False, device=device)
-    criterion = BinaryFocalLoss(
-        alpha=cfg.FOCAL_ALPHA,
-        gamma=cfg.FOCAL_GAMMA,
-    )
+    criterion = _build_loss_function(cfg)
 
     total_loss = 0.0
     example_count = 0
@@ -354,6 +365,8 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
     true_negative = 0
     false_positive = 0
     false_negative = 0
+    all_targets = []
+    all_probabilities = []
     with torch.inference_mode():
         for batch in test_loader:
             labels = batch.pop("labels").to(device, non_blocking=True)
@@ -369,6 +382,8 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
             batch_size = labels.size(0)
             total_loss += loss.item() * batch_size
             example_count += batch_size
+            all_targets.append(labels.cpu().numpy())
+            all_probabilities.append(probabilities.cpu().numpy())
             true_positive += int((predictions & actual).sum().item())
             true_negative += int((~predictions & ~actual).sum().item())
             false_positive += int((predictions & ~actual).sum().item())
@@ -381,10 +396,63 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
     precision = true_positive / max(true_positive + false_positive, 1)
     recall = true_positive / max(true_positive + false_negative, 1)
     f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    auc = _binary_metrics(
+        all_targets,
+        all_probabilities,
+        cfg.PREDICTION_THRESHOLD,
+    )["auc"]
     return {
         "test_loss": total_loss / example_count,
+        "auc": auc,
         "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
         "f1": f1,
     }
+
+
+def plot_training_results(history, test_metrics, save_path=None):
+    """Plot epoch training metrics alongside final held-out test metrics."""
+    if not history:
+        raise ValueError("history must contain at least one training epoch.")
+
+    metric_specs = (
+        ("loss", "train_loss", "test_loss", "Loss"),
+        ("auc", "train_auc", "auc", "AUC"),
+        ("precision", "train_precision", "precision", "Precision"),
+        ("recall", "train_recall", "recall", "Recall"),
+        ("accuracy", "train_accuracy", "accuracy", "Accuracy"),
+    )
+    epochs = [item["epoch"] for item in history]
+    figure, axes = plt.subplots(2, 3, figsize=(15, 8))
+
+    for axis, (key, train_key, test_key, title) in zip(axes.flat, metric_specs):
+        train_values = [item[train_key] for item in history]
+        test_value = test_metrics.get(test_key)
+        axis.plot(epochs, train_values, marker="o", markersize=3, label="Train")
+        if test_value is not None and np.isfinite(test_value):
+            axis.scatter(
+                [epochs[-1]],
+                [test_value],
+                marker="X",
+                s=90,
+                label="Test (final)",
+                zorder=3,
+            )
+        axis.set_title(title)
+        axis.set_xlabel("Epoch")
+        axis.grid(True, alpha=0.3)
+        axis.legend()
+        if key != "loss":
+            axis.set_ylim(0, 1)
+
+    axes.flat[-1].axis("off")
+    figure.suptitle("Training history and final held-out test metrics")
+    figure.tight_layout()
+
+    if save_path is not None:
+        output_path = Path(save_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_path, dpi=150, bbox_inches="tight")
+
+    return figure, axes

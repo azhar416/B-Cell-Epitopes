@@ -29,12 +29,17 @@ class CFG:
         self.LORA_LEARNING_RATE = 2e-4
         self.HEAD_LEARNING_RATE = 1e-4
         self.WEIGHT_DECAY = 0.001
+        self.LOSS_FUNCTION = "binary_focal"  # "binary_focal" or "bce"
         self.FOCAL_ALPHA = 0.75
         self.FOCAL_GAMMA = 2.0
         self.PREDICTION_THRESHOLD = 0.5
         self.GRADIENT_CLIP_NORM = 1.0
         self.NUM_WORKERS = 0
         self.CHECKPOINT_PATH = "checkpoints/protbert_classifier.pt"
+
+    def set_debug(self, debug=True):
+        self.DEBUG = debug
+        self.EPOCHS = 3 if self.DEBUG else 100
 
     def load_bcell_dataset(self):
         return pd.read_csv(self._BCELL_DATASET_PATH)
