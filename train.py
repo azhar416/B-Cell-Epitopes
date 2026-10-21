@@ -130,6 +130,11 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
     if isinstance(model, nn.DataParallel):
         model = model.module
 
+    if cfg.FREEZE_ENCODER:
+        for parameter in model.bert.parameters():
+            parameter.requires_grad = False
+        model.bert.eval()
+
     device_ids = []
     if (
         cfg.USE_MULTI_GPU
@@ -155,8 +160,15 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
         gamma=cfg.FOCAL_GAMMA,
     )
 
-    optimizer = torch.optim.AdamW(
-        [
+    if cfg.FREEZE_ENCODER:
+        optimizer_parameters = [
+            {
+                "params": model.classifier.parameters(),
+                "lr": cfg.HEAD_LEARNING_RATE,
+            }
+        ]
+    else:
+        optimizer_parameters = [
             {
                 "params": model.bert.parameters(),
                 "lr": cfg.ENCODER_LEARNING_RATE,
@@ -165,7 +177,10 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
                 "params": model.classifier.parameters(),
                 "lr": cfg.HEAD_LEARNING_RATE,
             },
-        ],
+        ]
+
+    optimizer = torch.optim.AdamW(
+        optimizer_parameters,
         weight_decay=cfg.WEIGHT_DECAY,
     )
 
@@ -179,9 +194,12 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
     else:
         print(f"Training on {device}")
 
+    base_model = model.module if isinstance(model, nn.DataParallel) else model
     history = []
     model.train()
     for epoch in range(cfg.EPOCHS):
+        if cfg.FREEZE_ENCODER:
+            base_model.bert.eval()
         total_loss = 0.0
         example_count = 0
         epoch_targets = []
@@ -254,14 +272,14 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
 
     checkpoint_path = Path(cfg.CHECKPOINT_PATH)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
     torch.save(
         {
-            "model_state_dict": checkpoint_model.state_dict(),
+            "model_state_dict": base_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "history": history,
             "model_name": cfg.MODEL_NAME,
             "dropout": cfg.DROPOUT,
+            "freeze_encoder": cfg.FREEZE_ENCODER,
         },
         checkpoint_path,
     )

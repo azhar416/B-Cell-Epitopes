@@ -14,6 +14,7 @@ class CFG:
         self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True
+        self.FREEZE_ENCODER = True
 
         self.TEST_SIZE = 0.2
         self.BATCH_SIZE = 16
