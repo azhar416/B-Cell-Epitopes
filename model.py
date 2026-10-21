@@ -10,9 +10,33 @@ class ProtBertForClassification(nn.Module):
         self,
         model_name="Rostlab/prot_bert",
         dropout=0.3,
+        use_lora=False,
+        lora_rank=8,
+        lora_alpha=16,
+        lora_dropout=0.1,
+        lora_target_modules=("query", "value"),
     ):
         super().__init__()
         self.bert = BertModel.from_pretrained(model_name)
+        self.use_lora = use_lora
+
+        if use_lora:
+            try:
+                from peft import LoraConfig, TaskType, get_peft_model
+            except ImportError as error:
+                raise ImportError(
+                    "LoRA requires PEFT. Install it with `pip install peft`."
+                ) from error
+
+            lora_config = LoraConfig(
+                r=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                target_modules=list(lora_target_modules),
+                bias="none",
+                task_type=TaskType.FEATURE_EXTRACTION,
+            )
+            self.bert = get_peft_model(self.bert, lora_config)
 
         hidden_size = self.bert.config.hidden_size
         self.classifier = nn.Sequential(

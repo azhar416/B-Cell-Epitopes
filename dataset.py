@@ -36,11 +36,11 @@ def prepare_dataset(
     random_state=42,
     max_length=32,
 ):
-    """Load one labeled dataset and return tokenized train/test PyTorch datasets.
+    """Tokenize peptide_seq and return train/test PyTorch datasets.
 
     B-cell examples are split by parent protein to prevent protein-level leakage.
     The SARS dataset contains one parent protein, so it is stratified by label
-    at the row level instead.
+    at the row level instead. protein_seq is metadata and is not passed to ProtBert.
     """
     filenames = {
         "bcell": "input_bcell.csv",
@@ -129,9 +129,15 @@ def prepare_dataset(
             )
 
     train_encodings = preprocess_for_protbert(
-        train_frame, tokenizer, max_length=max_length
+        train_frame,
+        tokenizer,
+        max_length=max_length,
+        sequence_column="peptide_seq",
     )
     test_encodings = preprocess_for_protbert(
-        test_frame, tokenizer, max_length=max_length
+        test_frame,
+        tokenizer,
+        max_length=max_length,
+        sequence_column="peptide_seq",
     )
     return PeptideDataset(train_encodings), PeptideDataset(test_encodings)

@@ -126,14 +126,41 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
     model = model or ProtBertForClassification(
         model_name=cfg.MODEL_NAME,
         dropout=cfg.DROPOUT,
+        use_lora=cfg.USE_LORA,
+        lora_rank=cfg.LORA_RANK,
+        lora_alpha=cfg.LORA_ALPHA,
+        lora_dropout=cfg.LORA_DROPOUT,
+        lora_target_modules=cfg.LORA_TARGET_MODULES,
     )
     if isinstance(model, nn.DataParallel):
         model = model.module
 
-    if cfg.FREEZE_ENCODER:
+    model_uses_lora = getattr(model, "use_lora", False)
+    if cfg.USE_LORA and not model_uses_lora:
+        raise ValueError(
+            "USE_LORA is enabled, but the supplied model was not created with LoRA."
+        )
+    if not cfg.USE_LORA and model_uses_lora:
+        raise ValueError(
+            "The supplied model uses LoRA, but USE_LORA is disabled in CFG."
+        )
+
+    if cfg.USE_LORA:
+        adapter_parameters = []
+        for name, parameter in model.bert.named_parameters():
+            is_adapter = "lora_" in name
+            parameter.requires_grad = is_adapter
+            if is_adapter:
+                adapter_parameters.append(parameter)
+        if not adapter_parameters:
+            raise ValueError("LoRA is enabled, but no adapter parameters were found.")
+    elif cfg.FREEZE_ENCODER:
         for parameter in model.bert.parameters():
             parameter.requires_grad = False
         model.bert.eval()
+    else:
+        for parameter in model.bert.parameters():
+            parameter.requires_grad = True
 
     device_ids = []
     if (
@@ -160,24 +187,37 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
         gamma=cfg.FOCAL_GAMMA,
     )
 
-    if cfg.FREEZE_ENCODER:
-        optimizer_parameters = [
+    encoder_parameters = [
+        parameter
+        for parameter in model.bert.parameters()
+        if parameter.requires_grad
+    ]
+    classifier_parameters = [
+        parameter
+        for parameter in model.classifier.parameters()
+        if parameter.requires_grad
+    ]
+    optimizer_parameters = []
+    if encoder_parameters:
+        optimizer_parameters.append(
             {
-                "params": model.classifier.parameters(),
+                "params": encoder_parameters,
+                "lr": (
+                    cfg.LORA_LEARNING_RATE
+                    if cfg.USE_LORA
+                    else cfg.ENCODER_LEARNING_RATE
+                ),
+            }
+        )
+    if classifier_parameters:
+        optimizer_parameters.append(
+            {
+                "params": classifier_parameters,
                 "lr": cfg.HEAD_LEARNING_RATE,
             }
-        ]
-    else:
-        optimizer_parameters = [
-            {
-                "params": model.bert.parameters(),
-                "lr": cfg.ENCODER_LEARNING_RATE,
-            },
-            {
-                "params": model.classifier.parameters(),
-                "lr": cfg.HEAD_LEARNING_RATE,
-            },
-        ]
+        )
+    if not optimizer_parameters:
+        raise ValueError("The model has no trainable parameters.")
 
     optimizer = torch.optim.AdamW(
         optimizer_parameters,
@@ -198,7 +238,7 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
     history = []
     model.train()
     for epoch in range(cfg.EPOCHS):
-        if cfg.FREEZE_ENCODER:
+        if cfg.FREEZE_ENCODER and not cfg.USE_LORA:
             base_model.bert.eval()
         total_loss = 0.0
         example_count = 0
@@ -280,6 +320,13 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             "model_name": cfg.MODEL_NAME,
             "dropout": cfg.DROPOUT,
             "freeze_encoder": cfg.FREEZE_ENCODER,
+            "use_lora": cfg.USE_LORA,
+            "lora_rank": cfg.LORA_RANK if cfg.USE_LORA else None,
+            "lora_alpha": cfg.LORA_ALPHA if cfg.USE_LORA else None,
+            "lora_dropout": cfg.LORA_DROPOUT if cfg.USE_LORA else None,
+            "lora_target_modules": (
+                cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
+            ),
         },
         checkpoint_path,
     )

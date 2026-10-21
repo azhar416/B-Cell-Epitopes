@@ -15,12 +15,18 @@ class CFG:
         self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True
-        self.FREEZE_ENCODER = True
+        self.FREEZE_ENCODER = True # True to freeze ProtBert encoder, False to fine-tune it
+        self.USE_LORA = False
+        self.LORA_RANK = 8
+        self.LORA_ALPHA = 16
+        self.LORA_DROPOUT = 0.1
+        self.LORA_TARGET_MODULES = ("query", "value")
 
         self.TEST_SIZE = 0.2
         self.BATCH_SIZE = 32
         self.EPOCHS = 3 if self.DEBUG else 100
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
+        self.LORA_LEARNING_RATE = 2e-4
         self.HEAD_LEARNING_RATE = 1e-4
         self.WEIGHT_DECAY = 0.001
         self.FOCAL_ALPHA = 0.75
