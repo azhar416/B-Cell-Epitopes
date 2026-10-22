@@ -127,13 +127,25 @@ def _binary_metrics(targets, probabilities, threshold):
     }
 
 
-def train_model(train_dataset, cfg=None, model=None, device=None):
-    """Train ProtBert on a prepared dataset and save the final checkpoint."""
+def train_model(
+    train_dataset,
+    cfg=None,
+    model=None,
+    device=None,
+    validation_dataset=None,
+):
+    """Train ProtBert with validation-AUC early stopping."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
     if cfg.BATCH_SIZE < 1:
         raise ValueError("BATCH_SIZE must be at least 1.")
+    if validation_dataset is None or len(validation_dataset) == 0:
+        raise ValueError("A non-empty validation_dataset is required.")
+    if cfg.EARLY_STOPPING_PATIENCE < 1:
+        raise ValueError("EARLY_STOPPING_PATIENCE must be at least 1.")
+    if cfg.EARLY_STOPPING_MIN_DELTA < 0:
+        raise ValueError("EARLY_STOPPING_MIN_DELTA must be non-negative.")
 
     set_seed(cfg.SEED)
     device = torch.device(
@@ -198,6 +210,12 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
 
     model.to(device)
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
+    validation_loader = _make_loader(
+        validation_dataset,
+        cfg,
+        shuffle=False,
+        device=device,
+    )
     criterion = _build_loss_function(cfg)
 
     encoder_parameters = [
@@ -249,8 +267,15 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
 
     base_model = model.module if isinstance(model, nn.DataParallel) else model
     history = []
-    model.train()
+    best_auc = float("-inf")
+    best_validation_loss = float("inf")
+    best_epoch = 0
+    epochs_without_auc_improvement = 0
+    checkpoint_path = Path(cfg.CHECKPOINT_PATH)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
     for epoch in range(cfg.EPOCHS):
+        model.train()
         if cfg.FREEZE_ENCODER and not cfg.USE_LORA:
             base_model.bert.eval()
         total_loss = 0.0
@@ -304,6 +329,37 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             epoch_probabilities,
             cfg.PREDICTION_THRESHOLD,
         )
+        validation_metrics = _evaluate_dataset(
+            model=model,
+            data_loader=validation_loader,
+            criterion=criterion,
+            cfg=cfg,
+            device=device,
+        )
+        validation_auc = validation_metrics["auc"]
+        validation_loss = validation_metrics["loss"]
+        if not np.isfinite(validation_auc):
+            raise ValueError(
+                "Validation data must contain both target classes to monitor AUC."
+            )
+        auc_improved = validation_auc > best_auc + cfg.EARLY_STOPPING_MIN_DELTA
+        auc_tied_with_better_loss = (
+            best_epoch > 0
+            and validation_auc == best_auc
+            and validation_loss < best_validation_loss
+        )
+        if auc_improved:
+            best_auc = validation_auc
+            best_validation_loss = validation_loss
+            best_epoch = epoch + 1
+            epochs_without_auc_improvement = 0
+        elif auc_tied_with_better_loss:
+            best_validation_loss = validation_loss
+            best_epoch = epoch + 1
+            epochs_without_auc_improvement += 1
+        else:
+            epochs_without_auc_improvement += 1
+
         history.append(
             {
                 "epoch": epoch + 1,
@@ -312,22 +368,102 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
                 "train_recall": metrics["recall"],
                 "train_precision": metrics["precision"],
                 "train_accuracy": metrics["accuracy"],
+                "validation_loss": validation_loss,
+                "validation_auc": validation_auc,
+                "validation_recall": validation_metrics["recall"],
+                "validation_precision": validation_metrics["precision"],
+                "validation_accuracy": validation_metrics["accuracy"],
             }
         )
         print(
             f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
-            f"loss: {epoch_loss:.4f}, "
-            f"AUC: {metrics['auc']:.4f}, "
-            f"recall: {metrics['recall']:.4f}, "
-            f"precision: {metrics['precision']:.4f}, "
-            f"accuracy: {metrics['accuracy']:.4f}"
+            f"train_loss: {epoch_loss:.4f}, "
+            f"train_auc: {metrics['auc']:.4f}, "
+            f"val_loss: {validation_loss:.4f}, "
+            f"val_auc: {validation_auc:.4f}, "
+            f"val_recall: {validation_metrics['recall']:.4f}, "
+            f"val_precision: {validation_metrics['precision']:.4f}, "
+            f"val_accuracy: {validation_metrics['accuracy']:.4f}"
         )
+        if auc_improved or auc_tied_with_better_loss:
+            _save_checkpoint(
+                checkpoint_path=checkpoint_path,
+                model=base_model,
+                optimizer=optimizer,
+                history=history,
+                cfg=cfg,
+                best_epoch=best_epoch,
+                best_validation_auc=best_auc,
+                best_validation_loss=best_validation_loss,
+            )
+        if epochs_without_auc_improvement >= cfg.EARLY_STOPPING_PATIENCE:
+            print(
+                "Early stopping after "
+                f"{epoch + 1} epochs; best validation AUC "
+                f"{best_auc:.4f} at epoch {best_epoch}."
+            )
+            break
 
-    checkpoint_path = Path(cfg.CHECKPOINT_PATH)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    best_checkpoint = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=True,
+    )
+    base_model.load_state_dict(best_checkpoint["model_state_dict"])
+    best_checkpoint["history"] = history
+    torch.save(best_checkpoint, checkpoint_path)
+    print(f"Saved checkpoint to {checkpoint_path}")
+    print(f"Restored best model from epoch {best_epoch} (validation AUC {best_auc:.4f}).")
+    return model, history
+
+
+def _evaluate_dataset(model, data_loader, criterion, cfg, device):
+    model.eval()
+    total_loss = 0.0
+    example_count = 0
+    all_targets = []
+    all_probabilities = []
+    with torch.inference_mode():
+        for batch in data_loader:
+            labels = batch.pop("labels").to(device, non_blocking=True)
+            inputs = {
+                key: value.to(device, non_blocking=True)
+                for key, value in batch.items()
+            }
+            probabilities = model(**inputs)
+            loss = criterion(probabilities, labels)
+            batch_size = labels.size(0)
+            total_loss += loss.item() * batch_size
+            example_count += batch_size
+            all_targets.append(labels.cpu().numpy())
+            all_probabilities.append(probabilities.cpu().numpy())
+
+    if example_count == 0:
+        raise ValueError("Cannot evaluate an empty dataset.")
+    metrics = _binary_metrics(
+        all_targets,
+        all_probabilities,
+        cfg.PREDICTION_THRESHOLD,
+    )
+    return {
+        "loss": total_loss / example_count,
+        **metrics,
+    }
+
+
+def _save_checkpoint(
+    checkpoint_path,
+    model,
+    optimizer,
+    history,
+    cfg,
+    best_epoch,
+    best_validation_auc,
+    best_validation_loss,
+):
     torch.save(
         {
-            "model_state_dict": base_model.state_dict(),
+            "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "history": history,
             "model_name": cfg.MODEL_NAME,
@@ -341,11 +477,12 @@ def train_model(train_dataset, cfg=None, model=None, device=None):
             "lora_target_modules": (
                 cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
             ),
+            "best_epoch": best_epoch,
+            "best_validation_auc": best_validation_auc,
+            "best_validation_loss": best_validation_loss,
         },
         checkpoint_path,
     )
-    print(f"Saved checkpoint to {checkpoint_path}")
-    return model, history
 
 
 def evaluate_model(model, test_dataset, cfg=None, device=None):
@@ -355,56 +492,21 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model.to(device)
-    model.eval()
     test_loader = _make_loader(test_dataset, cfg, shuffle=False, device=device)
-    criterion = _build_loss_function(cfg)
-
-    total_loss = 0.0
-    example_count = 0
-    true_positive = 0
-    true_negative = 0
-    false_positive = 0
-    false_negative = 0
-    all_targets = []
-    all_probabilities = []
-    with torch.inference_mode():
-        for batch in test_loader:
-            labels = batch.pop("labels").to(device, non_blocking=True)
-            inputs = {
-                key: value.to(device, non_blocking=True)
-                for key, value in batch.items()
-            }
-            probabilities = model(**inputs)
-            loss = criterion(probabilities, labels)
-            predictions = probabilities >= cfg.PREDICTION_THRESHOLD
-            actual = labels >= cfg.PREDICTION_THRESHOLD
-
-            batch_size = labels.size(0)
-            total_loss += loss.item() * batch_size
-            example_count += batch_size
-            all_targets.append(labels.cpu().numpy())
-            all_probabilities.append(probabilities.cpu().numpy())
-            true_positive += int((predictions & actual).sum().item())
-            true_negative += int((~predictions & ~actual).sum().item())
-            false_positive += int((predictions & ~actual).sum().item())
-            false_negative += int((~predictions & actual).sum().item())
-
-    if example_count == 0:
-        raise ValueError("Cannot evaluate an empty test dataset.")
-
-    accuracy = (true_positive + true_negative) / example_count
-    precision = true_positive / max(true_positive + false_positive, 1)
-    recall = true_positive / max(true_positive + false_negative, 1)
+    test_metrics = _evaluate_dataset(
+        model=model,
+        data_loader=test_loader,
+        criterion=_build_loss_function(cfg),
+        cfg=cfg,
+        device=device,
+    )
+    precision = test_metrics["precision"]
+    recall = test_metrics["recall"]
     f1 = 2 * precision * recall / max(precision + recall, 1e-12)
-    auc = _binary_metrics(
-        all_targets,
-        all_probabilities,
-        cfg.PREDICTION_THRESHOLD,
-    )["auc"]
     return {
-        "test_loss": total_loss / example_count,
-        "auc": auc,
-        "accuracy": accuracy,
+        "test_loss": test_metrics["loss"],
+        "auc": test_metrics["auc"],
+        "accuracy": test_metrics["accuracy"],
         "precision": precision,
         "recall": recall,
         "f1": f1,
@@ -417,19 +519,30 @@ def plot_training_results(history, test_metrics, save_path=None):
         raise ValueError("history must contain at least one training epoch.")
 
     metric_specs = (
-        ("loss", "train_loss", "test_loss", "Loss"),
-        ("auc", "train_auc", "auc", "AUC"),
-        ("precision", "train_precision", "precision", "Precision"),
-        ("recall", "train_recall", "recall", "Recall"),
-        ("accuracy", "train_accuracy", "accuracy", "Accuracy"),
+        ("loss", "train_loss", "validation_loss", "test_loss", "Loss"),
+        ("auc", "train_auc", "validation_auc", "auc", "AUC"),
+        ("precision", "train_precision", "validation_precision", "precision", "Precision"),
+        ("recall", "train_recall", "validation_recall", "recall", "Recall"),
+        ("accuracy", "train_accuracy", "validation_accuracy", "accuracy", "Accuracy"),
     )
     epochs = [item["epoch"] for item in history]
     figure, axes = plt.subplots(2, 3, figsize=(15, 8))
 
-    for axis, (key, train_key, test_key, title) in zip(axes.flat, metric_specs):
+    for axis, (key, train_key, validation_key, test_key, title) in zip(
+        axes.flat,
+        metric_specs,
+    ):
         train_values = [item[train_key] for item in history]
+        validation_values = [item[validation_key] for item in history]
         test_value = test_metrics.get(test_key)
         axis.plot(epochs, train_values, marker="o", markersize=3, label="Train")
+        axis.plot(
+            epochs,
+            validation_values,
+            marker="o",
+            markersize=3,
+            label="Validation",
+        )
         if test_value is not None and np.isfinite(test_value):
             axis.scatter(
                 [epochs[-1]],

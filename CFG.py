@@ -27,6 +27,8 @@ class CFG:
         self.TEST_SIZE = 0.15
         self.BATCH_SIZE = 32
         self.EPOCHS = 3 if self.DEBUG else 100
+        self.EARLY_STOPPING_PATIENCE = 15
+        self.EARLY_STOPPING_MIN_DELTA = 0.001
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
         self.LORA_LEARNING_RATE = 2e-4
         self.HEAD_LEARNING_RATE = 1e-4
