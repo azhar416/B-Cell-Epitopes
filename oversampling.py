@@ -2,7 +2,7 @@ import numpy as np
 from torch.utils.data import Subset
 
 
-USE_OVERSAMPLING = True  # Set to False to disable oversampling of the training dataset
+USE_OVERSAMPLING = False  # Set to False to disable oversampling of the training dataset
 
 
 def oversample_training_dataset(dataset, random_state=42, enabled=None):
