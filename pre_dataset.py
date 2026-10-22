@@ -10,6 +10,17 @@ def load_protbert_tokenizer(model_name="Rostlab/prot_bert"):
     return BertTokenizer.from_pretrained(model_name, do_lower_case=False)
 
 
+def load_protein_tokenizer(model_type, model_name):
+    """Load the tokenizer paired with the selected protein language model."""
+    if model_type.lower() == "protbert":
+        return load_protbert_tokenizer(model_name)
+    if model_type.lower() == "esm2":
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_name)
+    raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+
+
 def load_labeled_datasets(*csv_paths):
     """Load and combine labeled peptide CSV files with matching columns."""
     if not csv_paths:
@@ -32,7 +43,29 @@ def preprocess_for_protbert(
     sequence_column="peptide_seq",
     label_column="target",
 ):
-    """Normalize peptide sequences and tokenize them for ProtBert classification."""
+    """Normalize and space amino acids for ProtBert classification."""
+    return preprocess_for_protein_model(
+        dataframe,
+        tokenizer,
+        model_type="protbert",
+        max_length=max_length,
+        sequence_column=sequence_column,
+        label_column=label_column,
+    )
+
+
+def preprocess_for_protein_model(
+    dataframe,
+    tokenizer,
+    model_type,
+    max_length=32,
+    sequence_column="peptide_seq",
+    label_column="target",
+):
+    """Normalize peptide sequences for ProtBert or ESM2 tokenization."""
+    model_type = model_type.lower()
+    if model_type not in {"protbert", "esm2"}:
+        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
     if max_length < 1:
         raise ValueError("max_length must be a positive integer.")
     if sequence_column not in dataframe or label_column not in dataframe:
@@ -55,9 +88,13 @@ def preprocess_for_protbert(
             raise ValueError(
                 f"Unsupported residues at row {index}: {sorted(invalid)}"
             )
-        sequences.append(
-            " ".join("X" if residue in rare_amino_acids else residue for residue in sequence)
+        normalized_sequence = "".join(
+            "X" if residue in rare_amino_acids else residue
+            for residue in sequence
         )
+        if model_type == "protbert":
+            normalized_sequence = " ".join(normalized_sequence)
+        sequences.append(normalized_sequence)
 
     labels = pd.to_numeric(dataframe[label_column], errors="raise")
     if not labels.isin((0, 1)).all():

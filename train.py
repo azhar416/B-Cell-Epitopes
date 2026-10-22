@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from CFG import CFG
-from model import ProtBertForClassification
+from model import ESM2ForClassification, ProtBertForClassification
 
 
 class BinaryFocalLoss(nn.Module):
@@ -134,7 +134,7 @@ def train_model(
     device=None,
     validation_dataset=None,
 ):
-    """Train ProtBert with validation-AUC early stopping."""
+    """Train a protein language model with validation-AUC early stopping."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
@@ -151,7 +151,14 @@ def train_model(
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model = model or ProtBertForClassification(
+    model_type = cfg.MODEL_TYPE.lower()
+    model_classes = {
+        "protbert": ProtBertForClassification,
+        "esm2": ESM2ForClassification,
+    }
+    if model_type not in model_classes:
+        raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
+    model = model or model_classes[model_type](
         model_name=cfg.MODEL_NAME,
         dropout=cfg.DROPOUT,
         use_lora=cfg.USE_LORA,
@@ -467,6 +474,7 @@ def _save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "history": history,
             "model_name": cfg.MODEL_NAME,
+            "model_type": cfg.MODEL_TYPE,
             "dropout": cfg.DROPOUT,
             "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,

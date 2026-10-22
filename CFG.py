@@ -11,7 +11,9 @@ class CFG:
         self._SARS_DATASET_PATH = f"{self._DATASET_PATH}/input_sars.csv"
         self._SARS2_DATASET_PATH = f"{self._DATASET_PATH}/input_covid.csv"
 
+        self.MODEL_TYPE = "protbert"  # choose "protbert" or "esm2"
         self.MODEL_NAME = "Rostlab/prot_bert"
+        self.ESM2_MODEL_NAME = "facebook/esm2_t6_8M_UR50D"
         self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True

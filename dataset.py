@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from pre_dataset import preprocess_for_protbert
+from pre_dataset import preprocess_for_protein_model
 
 
 class PeptideDataset(Dataset):
@@ -37,12 +37,13 @@ def prepare_dataset(
     test_size=0.15,
     random_state=42,
     max_length=32,
+    model_type="protbert",
 ):
     """Tokenize peptide_seq and return train/validation/test datasets.
 
     B-cell examples are split by parent protein to prevent protein-level leakage.
     Identical normalized SARS peptide sequences are kept in the same split.
-    protein_seq is metadata and is not passed to ProtBert.
+    protein_seq is metadata and is not passed to the language model.
     """
     filenames = {
         "bcell": "input_bcell.csv",
@@ -51,6 +52,8 @@ def prepare_dataset(
     dataset_name = dataset_name.lower()
     if dataset_name not in filenames:
         raise ValueError("dataset_name must be either 'bcell' or 'sars'.")
+    if model_type.lower() not in {"protbert", "esm2"}:
+        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
     split_sizes = np.asarray([train_size, validation_size, test_size], dtype=float)
     if (
         not np.isfinite(split_sizes).all()
@@ -112,9 +115,10 @@ def prepare_dataset(
 
     datasets = []
     for split_frame in frames:
-        encodings = preprocess_for_protbert(
+        encodings = preprocess_for_protein_model(
             split_frame,
             tokenizer,
+            model_type=model_type,
             max_length=max_length,
             sequence_column="peptide_seq",
         )

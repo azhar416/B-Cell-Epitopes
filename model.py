@@ -1,14 +1,14 @@
 import torch
 from torch import nn
-from transformers import BertModel
+from transformers import AutoModel
 
 
-class ProtBertForClassification(nn.Module):
-    """ProtBert encoder with a binary classification head."""
+class ProteinTransformerForClassification(nn.Module):
+    """Protein language model encoder with a binary classification head."""
 
     def __init__(
         self,
-        model_name="Rostlab/prot_bert",
+        model_name,
         dropout=0.3,
         use_lora=False,
         lora_rank=8,
@@ -17,7 +17,7 @@ class ProtBertForClassification(nn.Module):
         lora_target_modules=("query", "value"),
     ):
         super().__init__()
-        self.bert = BertModel.from_pretrained(model_name)
+        self.bert = AutoModel.from_pretrained(model_name)
         self.use_lora = use_lora
 
         if use_lora:
@@ -49,10 +49,26 @@ class ProtBertForClassification(nn.Module):
         )
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
+        model_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if token_type_ids is not None and self.bert.config.model_type == "bert":
+            model_inputs["token_type_ids"] = token_type_ids
+        outputs = self.bert(**model_inputs)
         cls_embedding = outputs.last_hidden_state[:, 0, :]
         return self.classifier(cls_embedding).squeeze(-1)
+
+
+class ProtBertForClassification(ProteinTransformerForClassification):
+    """ProtBert encoder with a binary classification head."""
+
+    def __init__(self, model_name="Rostlab/prot_bert", **kwargs):
+        super().__init__(model_name=model_name, **kwargs)
+
+
+class ESM2ForClassification(ProteinTransformerForClassification):
+    """ESM2 encoder with a binary classification head."""
+
+    def __init__(self, model_name="facebook/esm2_t6_8M_UR50D", **kwargs):
+        super().__init__(model_name=model_name, **kwargs)
