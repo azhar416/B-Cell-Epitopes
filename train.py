@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 
 from CFG import CFG
 from model import ESM2ForClassification, ProtBertForClassification
+import oversampling
 
 
 class BinaryFocalLoss(nn.Module):
@@ -216,6 +217,18 @@ def train_model(
         device = torch.device("cuda", primary_device)
 
     model.to(device)
+    if oversampling.USE_OVERSAMPLING:
+        original_size = len(train_dataset)
+        train_dataset = oversampling.oversample_training_dataset(
+            train_dataset,
+            random_state=cfg.SEED,
+        )
+        print(
+            "Training-only random oversampling enabled: "
+            f"{original_size} -> {len(train_dataset)} examples"
+        )
+    else:
+        print("Training-only random oversampling disabled.")
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
     validation_loader = _make_loader(
         validation_dataset,
