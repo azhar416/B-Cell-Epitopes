@@ -32,15 +32,17 @@ def prepare_dataset(
     dataset_name,
     tokenizer,
     data_dir="dataset",
-    test_size=0.2,
+    train_size=0.7,
+    validation_size=0.15,
+    test_size=0.15,
     random_state=42,
     max_length=32,
 ):
-    """Tokenize peptide_seq and return train/test PyTorch datasets.
+    """Tokenize peptide_seq and return train/validation/test datasets.
 
     B-cell examples are split by parent protein to prevent protein-level leakage.
-    The SARS dataset contains one parent protein, so it is stratified by label
-    at the row level instead. protein_seq is metadata and is not passed to ProtBert.
+    Identical normalized SARS peptide sequences are kept in the same split.
+    protein_seq is metadata and is not passed to ProtBert.
     """
     filenames = {
         "bcell": "input_bcell.csv",
@@ -49,8 +51,16 @@ def prepare_dataset(
     dataset_name = dataset_name.lower()
     if dataset_name not in filenames:
         raise ValueError("dataset_name must be either 'bcell' or 'sars'.")
-    if not 0 < test_size < 1:
-        raise ValueError("test_size must be between 0 and 1.")
+    split_sizes = np.asarray([train_size, validation_size, test_size], dtype=float)
+    if (
+        not np.isfinite(split_sizes).all()
+        or (split_sizes <= 0).any()
+        or not np.isclose(split_sizes.sum(), 1.0)
+    ):
+        raise ValueError(
+            "train_size, validation_size, and test_size must be positive "
+            "and sum to 1."
+        )
 
     csv_path = Path(data_dir) / filenames[dataset_name]
     dataframe = pd.read_csv(csv_path)
@@ -71,73 +81,123 @@ def prepare_dataset(
             raise ValueError(f"{csv_path.name} is missing 'parent_protein_id'.")
         if dataframe["parent_protein_id"].isna().any():
             raise ValueError("'parent_protein_id' must not contain missing values.")
-
-        group_counts = dataframe.groupby("parent_protein_id")["target"].agg(
-            total="size",
-            positive="sum",
-        )
-        group_counts["negative"] = group_counts["total"] - group_counts["positive"]
-        groups = group_counts.index.to_numpy()
-        if len(groups) < 2:
-            raise ValueError("A protein-grouped split requires at least two proteins.")
-        counts = group_counts[["total", "positive", "negative"]].to_numpy()
-        target_counts = counts.sum(axis=0) * test_size
-        denominators = np.maximum(target_counts, 1)
-        best_score = float("inf")
-        best_test_groups = groups[:0]
-
-        for _ in range(128):
-            group_order = rng.permutation(len(groups))
-            cumulative_counts = np.vstack(
-                (np.zeros(3, dtype=np.int64), np.cumsum(counts[group_order], axis=0))
-            )
-            relative_errors = (cumulative_counts - target_counts) / denominators
-            scores = np.square(relative_errors).sum(axis=1)
-            scores[[0, -1]] = np.inf
-            best_count = int(scores.argmin())
-            if scores[best_count] < best_score:
-                best_score = scores[best_count]
-                best_test_groups = groups[group_order[:best_count]]
-
-        test_groups = set(best_test_groups)
-        test_mask = dataframe["parent_protein_id"].isin(test_groups)
-        train_frame = dataframe.loc[~test_mask].copy()
-        test_frame = dataframe.loc[test_mask].copy()
+        group_ids = dataframe["parent_protein_id"]
     else:
-        test_indices = []
-        for label, label_frame in dataframe.groupby("target", sort=True):
-            if len(label_frame) < 2:
-                raise ValueError(
-                    f"Cannot stratify label {label}: at least two rows are required."
-                )
-            indices = label_frame.index.to_numpy(copy=True)
-            rng.shuffle(indices)
-            label_test_count = min(
-                max(1, round(len(indices) * test_size)),
-                len(indices) - 1,
-            )
-            test_indices.extend(indices[:label_test_count])
+        normalized_sequences = (
+            dataframe["peptide_seq"]
+            .astype("string")
+            .str.upper()
+            .str.replace(r"\s+", "", regex=True)
+        )
+        if normalized_sequences.isna().any() or normalized_sequences.eq("").any():
+            raise ValueError("'peptide_seq' must not contain missing or empty values.")
+        group_ids = normalized_sequences
 
-        test_mask = dataframe.index.isin(test_indices)
-        train_frame = dataframe.loc[~test_mask].copy()
-        test_frame = dataframe.loc[test_mask].copy()
+    frames = _grouped_train_validation_test_split(
+        dataframe=dataframe,
+        group_ids=group_ids,
+        split_sizes=split_sizes,
+        rng=rng,
+    )
+    train_frame, validation_frame, test_frame = frames
 
-    for split_name, split_frame in (("training", train_frame), ("test", test_frame)):
+    for split_name, split_frame in zip(
+        ("training", "validation", "test"),
+        frames,
+    ):
         if split_frame.empty or split_frame["target"].nunique() != 2:
             raise ValueError(
                 f"The {split_name} split does not contain both target classes."
             )
 
-    train_encodings = preprocess_for_protbert(
-        train_frame,
-        tokenizer,
-        max_length=max_length,
-        sequence_column="peptide_seq",
+    datasets = []
+    for split_frame in frames:
+        encodings = preprocess_for_protbert(
+            split_frame,
+            tokenizer,
+            max_length=max_length,
+            sequence_column="peptide_seq",
+        )
+        datasets.append(PeptideDataset(encodings))
+    return tuple(datasets)
+
+
+def _grouped_train_validation_test_split(dataframe, group_ids, split_sizes, rng):
+    """Assign whole groups to approximate the requested sizes and class ratios."""
+    group_frame = pd.DataFrame(
+        {
+            "group": group_ids.to_numpy(),
+            "target": dataframe["target"].to_numpy(),
+        }
     )
-    test_encodings = preprocess_for_protbert(
-        test_frame,
-        tokenizer,
-        max_length=max_length,
-        sequence_column="peptide_seq",
+    group_counts = group_frame.groupby("group", sort=False)["target"].agg(
+        total="size",
+        positive="sum",
     )
-    return PeptideDataset(train_encodings), PeptideDataset(test_encodings)
+    group_counts["negative"] = group_counts["total"] - group_counts["positive"]
+    groups = group_counts.index.to_numpy()
+    counts = group_counts[["total", "positive", "negative"]].to_numpy()
+    if len(groups) < 3:
+        raise ValueError("A three-way grouped split requires at least three groups.")
+
+    total_counts = counts.sum(axis=0)
+    target_counts = split_sizes[:, None] * total_counts
+    denominators = np.maximum(target_counts, 1)
+    best_score = float("inf")
+    best_splits = None
+
+    for _ in range(512):
+        order = rng.permutation(len(groups))
+        ordered_counts = counts[order]
+        cumulative = np.vstack(
+            (np.zeros(3, dtype=np.int64), np.cumsum(ordered_counts, axis=0))
+        )
+
+        train_errors = np.square(
+            (cumulative - target_counts[0]) / denominators[0]
+        ).sum(axis=1)
+        train_errors[[0, -2, -1]] = np.inf
+        train_end = int(train_errors.argmin())
+
+        remaining_counts = cumulative[-1] - cumulative[train_end]
+        val_prefixes = cumulative[train_end + 1 : -1] - cumulative[train_end]
+        validation_errors = np.square(
+            (val_prefixes - target_counts[1]) / denominators[1]
+        ).sum(axis=1)
+        if len(validation_errors) == 0:
+            continue
+
+        for validation_offset in np.argsort(validation_errors)[:8]:
+            validation_end = train_end + 1 + int(validation_offset)
+            train_counts = cumulative[train_end]
+            validation_counts = cumulative[validation_end] - train_counts
+            test_counts = remaining_counts - validation_counts
+            candidate_counts = (train_counts, validation_counts, test_counts)
+            if any((split_counts[1:] == 0).any() for split_counts in candidate_counts):
+                continue
+
+            score = sum(
+                np.square((observed - target) / denominator).sum()
+                for observed, target, denominator in zip(
+                    candidate_counts,
+                    target_counts,
+                    denominators,
+                )
+            )
+            if score < best_score:
+                best_score = score
+                train_groups = groups[order[:train_end]]
+                validation_groups = groups[order[train_end:validation_end]]
+                test_groups = groups[order[validation_end:]]
+                best_splits = (train_groups, validation_groups, test_groups)
+
+    if best_splits is None:
+        raise ValueError(
+            "Could not create three non-empty grouped splits containing both "
+            "target classes. More groups per class may be required."
+        )
+
+    return tuple(
+        dataframe.loc[group_ids.isin(split_groups)].copy()
+        for split_groups in best_splits
+    )

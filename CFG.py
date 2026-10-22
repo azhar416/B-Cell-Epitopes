@@ -22,7 +22,9 @@ class CFG:
         self.LORA_DROPOUT = 0.1
         self.LORA_TARGET_MODULES = ("query", "value")
 
-        self.TEST_SIZE = 0.2
+        self.TRAIN_SIZE = 0.7
+        self.VALIDATION_SIZE = 0.15
+        self.TEST_SIZE = 0.15
         self.BATCH_SIZE = 32
         self.EPOCHS = 3 if self.DEBUG else 100
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
