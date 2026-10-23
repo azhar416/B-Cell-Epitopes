@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from transformers import AutoModel
+from transformers import AutoModel, BertConfig
 
 
 class ProteinTransformerForClassification(nn.Module):
@@ -9,6 +9,7 @@ class ProteinTransformerForClassification(nn.Module):
     def __init__(
         self,
         model_name,
+        model_config=None,
         dropout=0.3,
         use_lora=False,
         lora_rank=8,
@@ -17,7 +18,10 @@ class ProteinTransformerForClassification(nn.Module):
         lora_target_modules=("query", "value"),
     ):
         super().__init__()
-        self.bert = AutoModel.from_pretrained(model_name)
+        self.bert = AutoModel.from_pretrained(
+            model_name,
+            config=model_config,
+        )
         self.use_lora = use_lora
 
         if use_lora:
@@ -64,7 +68,12 @@ class ProtBertForClassification(ProteinTransformerForClassification):
     """ProtBert encoder with a binary classification head."""
 
     def __init__(self, model_name="Rostlab/prot_bert", **kwargs):
-        super().__init__(model_name=model_name, **kwargs)
+        bert_config = BertConfig.from_pretrained(model_name)
+        super().__init__(
+            model_name=model_name,
+            model_config=bert_config,
+            **kwargs,
+        )
 
 
 class ESM2ForClassification(ProteinTransformerForClassification):

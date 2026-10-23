@@ -12,7 +12,7 @@ class CFG:
         self._SARS2_DATASET_PATH = f"{self._DATASET_PATH}/input_covid.csv"
 
         self.MODEL_TYPE = "protbert"  # choose "protbert" or "esm2"
-        self.MODEL_NAME = "Rostlab/prot_bert"
+        self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t6_8M_UR50D"
         self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
@@ -32,8 +32,8 @@ class CFG:
         self.EARLY_STOPPING_PATIENCE = 10
         self.EARLY_STOPPING_MIN_DELTA = 0.001
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
-        self.LORA_LEARNING_RATE = 5e-5
-        self.HEAD_LEARNING_RATE = 5e-5
+        self.LORA_LEARNING_RATE = 2e-4
+        self.HEAD_LEARNING_RATE = 1e-4
         self.WEIGHT_DECAY = 0.01
         self.LOSS_FUNCTION = "binary_focal"  # "binary_focal" or "bce"
         self.FOCAL_ALPHA = 0.75
@@ -42,6 +42,20 @@ class CFG:
         self.GRADIENT_CLIP_NORM = 1.0
         self.NUM_WORKERS = 0
         self.CHECKPOINT_PATH = "checkpoints/protbert_classifier.pt"
+
+    @property
+    def MODEL_NAME(self):
+        """Return the pretrained model matching the selected model type."""
+        model_names = {
+            "protbert": self.PROTBERT_MODEL_NAME,
+            "esm2": self.ESM2_MODEL_NAME,
+        }
+        try:
+            return model_names[self.MODEL_TYPE.lower()]
+        except KeyError as error:
+            raise ValueError(
+                "MODEL_TYPE must be either 'protbert' or 'esm2'."
+            ) from error
 
     def set_debug(self, debug=True):
         self.DEBUG = debug
