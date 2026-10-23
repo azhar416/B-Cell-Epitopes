@@ -83,5 +83,5 @@ class ProtBertForClassification(ProteinTransformerForClassification):
 class ESM2ForClassification(ProteinTransformerForClassification):
     """ESM2 encoder with a binary classification head."""
 
-    def __init__(self, model_name="facebook/esm2_t6_8M_UR50D", **kwargs):
+    def __init__(self, model_name="facebook/esm2_t12_35M_UR50D", **kwargs):
         super().__init__(model_name=model_name, **kwargs)
