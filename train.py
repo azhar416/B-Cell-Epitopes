@@ -125,6 +125,10 @@ def _binary_metrics(targets, probabilities, threshold):
         "recall": recall,
         "precision": precision,
         "accuracy": accuracy,
+        "confusion_matrix": [
+            [true_negative, false_positive],
+            [false_negative, true_positive],
+        ],
     }
 
 
@@ -558,6 +562,9 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
     precision = test_metrics["precision"]
     recall = test_metrics["recall"]
     f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    confusion_matrix = test_metrics["confusion_matrix"]
+    print("Confusion matrix (rows=true [0, 1], columns=predicted [0, 1]):")
+    print(np.asarray(confusion_matrix))
     return {
         "test_loss": test_metrics["loss"],
         "auc": test_metrics["auc"],
@@ -565,6 +572,7 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
         "precision": precision,
         "recall": recall,
         "f1": f1,
+        "confusion_matrix": confusion_matrix,
     }
 
 
