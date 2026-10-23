@@ -48,6 +48,38 @@ def prepare_dataset(
     Identical normalized SARS peptide sequences are kept in the same split.
     protein_seq is metadata and is not passed to the language model.
     """
+    if model_type.lower() not in {"protbert", "esm2"}:
+        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+    frames = prepare_dataset_frames(
+        dataset_name=dataset_name,
+        data_dir=data_dir,
+        train_size=train_size,
+        validation_size=validation_size,
+        test_size=test_size,
+        random_state=random_state,
+    )
+    datasets = []
+    for split_frame in frames:
+        encodings = preprocess_for_protein_model(
+            split_frame,
+            tokenizer,
+            model_type=model_type,
+            max_length=max_length,
+            sequence_column="peptide_seq",
+        )
+        datasets.append(PeptideDataset(encodings))
+    return tuple(datasets)
+
+
+def prepare_dataset_frames(
+    dataset_name,
+    data_dir="dataset",
+    train_size=0.7,
+    validation_size=0.15,
+    test_size=0.15,
+    random_state=42,
+):
+    """Load the dataset and return the shared grouped train/validation/test split."""
     filenames = {
         "bcell": "input_bcell.csv",
         "sars": "input_sars.csv",
@@ -55,8 +87,6 @@ def prepare_dataset(
     dataset_name = dataset_name.lower()
     if dataset_name not in filenames:
         raise ValueError("dataset_name must be either 'bcell' or 'sars'.")
-    if model_type.lower() not in {"protbert", "esm2"}:
-        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
     split_sizes = np.asarray([train_size, validation_size, test_size], dtype=float)
     if (
         not np.isfinite(split_sizes).all()
@@ -116,17 +146,7 @@ def prepare_dataset(
                 f"The {split_name} split does not contain both target classes."
             )
 
-    datasets = []
-    for split_frame in frames:
-        encodings = preprocess_for_protein_model(
-            split_frame,
-            tokenizer,
-            model_type=model_type,
-            max_length=max_length,
-            sequence_column="peptide_seq",
-        )
-        datasets.append(PeptideDataset(encodings))
-    return tuple(datasets)
+    return tuple(frames)
 
 
 def _grouped_train_validation_test_split(dataframe, group_ids, split_sizes, rng):
