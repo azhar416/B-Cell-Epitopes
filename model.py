@@ -15,6 +15,7 @@ class ProteinTransformerForClassification(nn.Module):
         lora_alpha=16,
         lora_dropout=0.1,
         lora_target_modules=("query", "value"),
+        feature_dim=0,
     ):
         super().__init__()
         self.bert = AutoModel.from_pretrained(
@@ -42,16 +43,25 @@ class ProteinTransformerForClassification(nn.Module):
             self.bert = get_peft_model(self.bert, lora_config)
 
         hidden_size = self.bert.config.hidden_size
+        if feature_dim < 0:
+            raise ValueError("feature_dim must be non-negative.")
+        self.feature_dim = feature_dim
         self.classifier = nn.Sequential(
             nn.Dropout(p=0.3),
-            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Linear(hidden_size + feature_dim, hidden_size // 2),
             nn.ReLU(),
             nn.Dropout(p=0.3),
             nn.Linear(hidden_size // 2, 1),
             nn.Sigmoid(),
         )
 
-    def forward(self, input_ids, attention_mask=None, token_type_ids=None):
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        token_type_ids=None,
+        features=None,
+    ):
         model_inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -60,6 +70,25 @@ class ProteinTransformerForClassification(nn.Module):
             model_inputs["token_type_ids"] = token_type_ids
         outputs = self.bert(**model_inputs)
         cls_embedding = outputs.last_hidden_state[:, 0, :]
+        if self.feature_dim:
+            if features is None:
+                raise ValueError(
+                    f"This model requires {self.feature_dim} additional features."
+                )
+            if features.ndim != 2 or features.shape != (
+                cls_embedding.shape[0],
+                self.feature_dim,
+            ):
+                raise ValueError(
+                    "features must have shape "
+                    f"({cls_embedding.shape[0]}, {self.feature_dim})."
+                )
+            cls_embedding = torch.cat(
+                (cls_embedding, features.to(dtype=cls_embedding.dtype)),
+                dim=-1,
+            )
+        elif features is not None:
+            raise ValueError("This model was created without additional features.")
         return self.classifier(cls_embedding).squeeze(-1)
 
 
