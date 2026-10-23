@@ -79,7 +79,7 @@ def prepare_dataset_frames(
     test_size=0.15,
     random_state=42,
 ):
-    """Load the dataset and return the shared grouped train/validation/test split."""
+    """Clean the selected peptide CSV and return grouped train/validation/test splits."""
     filenames = {
         "bcell": "input_bcell.csv",
         "sars": "input_sars.csv",
@@ -110,6 +110,18 @@ def prepare_dataset_frames(
     if not labels.isin((0, 1)).all():
         raise ValueError("'target' must contain only binary labels 0 and 1.")
     dataframe["target"] = labels.astype("int64")
+    dataframe, cleaning_summary = _clean_dataset(dataframe, dataset_name)
+    print(
+        f"Dataset cleaning ({dataset_name}): "
+        f"{cleaning_summary['input_rows']:,} -> {len(dataframe):,} rows; "
+        f"removed {cleaning_summary['conflicting_label_rows']:,} rows from "
+        f"{cleaning_summary['conflicting_label_sequences']:,} contradictory "
+        "B-cell peptide sequences, "
+        f"{cleaning_summary['long_sequence_rows']:,} SARS rows longer than "
+        "20 residues, and "
+        f"{cleaning_summary['duplicate_sequence_rows']:,} duplicate peptide "
+        "sequences."
+    )
     rng = np.random.default_rng(random_state)
 
     if dataset_name == "bcell":
@@ -147,6 +159,56 @@ def prepare_dataset_frames(
             )
 
     return tuple(frames)
+
+
+def _clean_dataset(dataframe, dataset_name):
+    """Remove contradictory, overlength, and duplicate peptide examples."""
+    dataframe = dataframe.copy()
+    normalized_sequences = (
+        dataframe["peptide_seq"]
+        .astype("string")
+        .str.upper()
+        .str.replace(r"\s+", "", regex=True)
+    )
+    if normalized_sequences.isna().any() or normalized_sequences.eq("").any():
+        raise ValueError("'peptide_seq' must not contain missing or empty values.")
+
+    dataframe["_normalized_peptide_seq"] = normalized_sequences
+    conflicting_label_rows = 0
+    conflicting_label_sequences = 0
+    long_sequence_rows = 0
+
+    if dataset_name == "bcell":
+        conflicting = dataframe.groupby("_normalized_peptide_seq")[
+            "target"
+        ].transform("nunique").gt(1)
+        conflicting_label_rows = int(conflicting.sum())
+        conflicting_label_sequences = int(
+            dataframe.loc[conflicting, "_normalized_peptide_seq"].nunique()
+        )
+        dataframe = dataframe.loc[~conflicting]
+    else:
+        overlength = dataframe["_normalized_peptide_seq"].str.len().gt(20)
+        long_sequence_rows = int(overlength.sum())
+        dataframe = dataframe.loc[~overlength]
+
+    duplicate_sequences = dataframe["_normalized_peptide_seq"].duplicated(
+        keep="first"
+    )
+    duplicate_sequence_rows = int(duplicate_sequences.sum())
+    dataframe = (
+        dataframe.loc[~duplicate_sequences]
+        .drop(columns="_normalized_peptide_seq")
+        .reset_index(drop=True)
+    )
+
+    return dataframe, {
+        "input_rows": len(normalized_sequences),
+        "conflicting_label_rows": conflicting_label_rows,
+        "conflicting_label_sequences": conflicting_label_sequences,
+        "long_sequence_rows": long_sequence_rows,
+        "duplicate_sequence_rows": duplicate_sequence_rows,
+    }
 
 
 def _grouped_train_validation_test_split(dataframe, group_ids, split_sizes, rng):
