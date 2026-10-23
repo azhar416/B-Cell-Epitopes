@@ -43,7 +43,11 @@ class ProteinTransformerForClassification(nn.Module):
 
         hidden_size = self.bert.config.hidden_size
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, 1),
+            nn.Dropout(p=0.3),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(hidden_size // 2, 1),
             nn.Sigmoid(),
         )
 
