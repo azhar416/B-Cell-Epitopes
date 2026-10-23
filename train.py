@@ -204,6 +204,8 @@ def train_model(
     )
     if isinstance(model, nn.DataParallel):
         model = model.module
+    print("Model architecture:")
+    print(model)
     model_uses_lora = getattr(model, "use_lora", False)
     if cfg.USE_LORA and not model_uses_lora:
         raise ValueError(
