@@ -22,16 +22,6 @@ class CFG:
         self.LORA_ALPHA = 8
         self.LORA_DROPOUT = 0.2
         self.LORA_TARGET_MODULES = ("query", "value")
-        self.FEATURE_COLUMNS = (
-            "chou_fasman",
-            "emini",
-            "kolaskar_tongaonkar",
-            "parker",
-            "isoelectric_point",
-            "aromaticity",
-            "hydrophobicity",
-            "stability",
-        )
 
         self.TRAIN_SIZE = 0.7
         self.VALIDATION_SIZE = 0.15

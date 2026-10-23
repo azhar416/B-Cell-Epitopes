@@ -194,16 +194,6 @@ def train_model(
     )
     print(f"  Epochs: {cfg.EPOCHS}")
 
-    train_features = train_dataset[0].get("features")
-    feature_dim = 0 if train_features is None else train_features.numel()
-    validation_features = validation_dataset[0].get("features")
-    validation_feature_dim = (
-        0 if validation_features is None else validation_features.numel()
-    )
-    if feature_dim != validation_feature_dim:
-        raise ValueError(
-            "Training and validation datasets must use the same feature columns."
-        )
     model = model or model_classes[model_type](
         model_name=cfg.MODEL_NAME,
         use_lora=cfg.USE_LORA,
@@ -211,15 +201,9 @@ def train_model(
         lora_alpha=cfg.LORA_ALPHA,
         lora_dropout=cfg.LORA_DROPOUT,
         lora_target_modules=cfg.LORA_TARGET_MODULES,
-        feature_dim=feature_dim,
     )
     if isinstance(model, nn.DataParallel):
         model = model.module
-    if getattr(model, "feature_dim", 0) != feature_dim:
-        raise ValueError(
-            "The model feature dimension does not match the training dataset."
-        )
-
     model_uses_lora = getattr(model, "use_lora", False)
     if cfg.USE_LORA and not model_uses_lora:
         raise ValueError(
@@ -340,7 +324,6 @@ def train_model(
     best_validation_loss = float("inf")
     best_epoch = 0
     epochs_without_auc_improvement = 0
-    feature_metadata = _get_feature_metadata(train_dataset)
     checkpoint_path = Path(cfg.CHECKPOINT_PATH)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -465,7 +448,6 @@ def train_model(
                 best_epoch=best_epoch,
                 best_validation_auc=best_auc,
                 best_validation_loss=best_validation_loss,
-                feature_metadata=feature_metadata,
             )
         if epochs_without_auc_improvement >= cfg.EARLY_STOPPING_PATIENCE:
             print(
@@ -531,7 +513,6 @@ def _save_checkpoint(
     best_epoch,
     best_validation_auc,
     best_validation_loss,
-    feature_metadata,
 ):
     torch.save(
         {
@@ -552,28 +533,9 @@ def _save_checkpoint(
             "best_epoch": best_epoch,
             "best_validation_auc": best_validation_auc,
             "best_validation_loss": best_validation_loss,
-            **feature_metadata,
         },
         checkpoint_path,
     )
-
-
-def _get_feature_metadata(dataset):
-    while hasattr(dataset, "dataset"):
-        dataset = dataset.dataset
-    return {
-        "feature_columns": list(getattr(dataset, "feature_columns", ())),
-        "feature_mean": (
-            []
-            if getattr(dataset, "feature_mean", None) is None
-            else dataset.feature_mean.tolist()
-        ),
-        "feature_scale": (
-            []
-            if getattr(dataset, "feature_scale", None) is None
-            else dataset.feature_scale.tolist()
-        ),
-    }
 
 
 def evaluate_model(model, test_dataset, cfg=None, device=None):

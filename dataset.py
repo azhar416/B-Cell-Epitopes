@@ -14,10 +14,6 @@ class PeptideDataset(Dataset):
     def __init__(
         self,
         encodings,
-        features=None,
-        feature_columns=(),
-        feature_mean=None,
-        feature_scale=None,
     ):
         self.encodings = {
             key: torch.tensor(values, dtype=torch.long)
@@ -25,30 +21,12 @@ class PeptideDataset(Dataset):
             if key != "labels"
         }
         self.labels = torch.tensor(encodings["labels"], dtype=torch.float32)
-        self.features = (
-            None
-            if features is None
-            else torch.tensor(features, dtype=torch.float32)
-        )
-        self.feature_columns = tuple(feature_columns)
-        self.feature_mean = (
-            None if feature_mean is None else np.asarray(feature_mean, dtype=float)
-        )
-        self.feature_scale = (
-            None if feature_scale is None else np.asarray(feature_scale, dtype=float)
-        )
-        if self.features is not None and (
-            self.features.ndim != 2 or len(self.features) != len(self.labels)
-        ):
-            raise ValueError("Features must be a 2D array aligned with labels.")
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, index):
         item = {key: values[index] for key, values in self.encodings.items()}
-        if self.features is not None:
-            item["features"] = self.features[index]
         item["labels"] = self.labels[index]
         return item
 
@@ -63,7 +41,6 @@ def prepare_dataset(
     random_state=42,
     max_length=32,
     model_type="protbert",
-    feature_columns=None,
 ):
     """Tokenize peptide_seq and return train/validation/test datasets.
 
@@ -103,24 +80,6 @@ def prepare_dataset(
     if not labels.isin((0, 1)).all():
         raise ValueError("'target' must contain only binary labels 0 and 1.")
     dataframe["target"] = labels.astype("int64")
-    feature_columns = tuple(feature_columns or ())
-    if len(feature_columns) != len(set(feature_columns)):
-        raise ValueError("feature_columns must not contain duplicates.")
-    missing_features = set(feature_columns).difference(dataframe.columns)
-    if missing_features:
-        raise ValueError(
-            f"{csv_path.name} is missing feature columns: "
-            f"{sorted(missing_features)}"
-        )
-    feature_values = None
-    if feature_columns:
-        feature_frame = dataframe.loc[:, feature_columns].apply(
-            pd.to_numeric,
-            errors="raise",
-        )
-        feature_values = feature_frame.to_numpy(dtype=np.float64)
-        if not np.isfinite(feature_values).all():
-            raise ValueError("Feature columns must contain only finite values.")
     rng = np.random.default_rng(random_state)
 
     if dataset_name == "bcell":
@@ -157,23 +116,8 @@ def prepare_dataset(
                 f"The {split_name} split does not contain both target classes."
             )
 
-    if feature_values is not None:
-        train_indices = train_frame.index.to_numpy()
-        feature_mean = feature_values[train_indices].mean(axis=0)
-        feature_scale = feature_values[train_indices].std(axis=0)
-        feature_scale[feature_scale == 0] = 1.0
-        split_features = tuple(
-            (feature_values[split_frame.index.to_numpy()] - feature_mean)
-            / feature_scale
-            for split_frame in frames
-        )
-    else:
-        feature_mean = None
-        feature_scale = None
-        split_features = (None,) * len(frames)
-
     datasets = []
-    for split_frame, scaled_features in zip(frames, split_features):
+    for split_frame in frames:
         encodings = preprocess_for_protein_model(
             split_frame,
             tokenizer,
@@ -181,15 +125,7 @@ def prepare_dataset(
             max_length=max_length,
             sequence_column="peptide_seq",
         )
-        datasets.append(
-            PeptideDataset(
-                encodings,
-                features=scaled_features,
-                feature_columns=feature_columns,
-                feature_mean=feature_mean,
-                feature_scale=feature_scale,
-            )
-        )
+        datasets.append(PeptideDataset(encodings))
     return tuple(datasets)
 
 
