@@ -161,6 +161,39 @@ def train_model(
         raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
     if len(train_dataset) == 0:
         raise ValueError("A non-empty train_dataset is required.")
+    print("Training configuration:")
+    print(f"  Model: {cfg.MODEL_TYPE} ({cfg.MODEL_NAME})")
+    print(f"  Dataset: {cfg.DATASET_NAME}")
+    print(
+        "  Split sizes: "
+        f"train={cfg.TRAIN_SIZE:.0%}, "
+        f"validation={cfg.VALIDATION_SIZE:.0%}, "
+        f"test={cfg.TEST_SIZE:.0%} "
+        f"(examples: train={len(train_dataset):,}, "
+        f"validation={len(validation_dataset):,})"
+    )
+    print(f"  Loss function: {cfg.LOSS_FUNCTION}")
+    if cfg.LOSS_FUNCTION.lower() == "binary_focal":
+        print(
+            f"    Focal alpha={cfg.FOCAL_ALPHA}, gamma={cfg.FOCAL_GAMMA}"
+        )
+    print(f"  LoRA: {'enabled' if cfg.USE_LORA else 'disabled'}")
+    print(
+        "  LoRA config: "
+        f"rank={cfg.LORA_RANK}, alpha={cfg.LORA_ALPHA}, "
+        f"dropout={cfg.LORA_DROPOUT}"
+        if cfg.USE_LORA
+        else "  LoRA config: not active"
+    )
+    print(
+        "  Learning rates: "
+        f"head={cfg.HEAD_LEARNING_RATE:g}, "
+        f"LoRA={cfg.LORA_LEARNING_RATE:g}"
+        if cfg.USE_LORA
+        else f"  Learning rate: head={cfg.HEAD_LEARNING_RATE:g}"
+    )
+    print(f"  Epochs: {cfg.EPOCHS}")
+
     train_features = train_dataset[0].get("features")
     feature_dim = 0 if train_features is None else train_features.numel()
     validation_features = validation_dataset[0].get("features")
