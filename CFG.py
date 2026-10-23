@@ -18,14 +18,14 @@ class CFG:
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
         self.USE_LORA = True  # Set True to train LoRA adapters instead
-        self.LORA_RANK = 8
-        self.LORA_ALPHA = 16
+        self.LORA_RANK = 4
+        self.LORA_ALPHA = 8
         self.LORA_DROPOUT = 0.2
         self.LORA_TARGET_MODULES = ("query", "value")
 
         self.TRAIN_SIZE = 0.7
-        self.VALIDATION_SIZE = 0.15
-        self.TEST_SIZE = 0.15
+        self.VALIDATION_SIZE = 0.10
+        self.TEST_SIZE = 0.20
         self.BATCH_SIZE = 32
         self.EPOCHS = 3 if self.DEBUG else 100
         self.EARLY_STOPPING_PATIENCE = 10
