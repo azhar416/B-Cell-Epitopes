@@ -17,7 +17,7 @@ class CFG:
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
-        self.USE_LORA = False  # Set True to train LoRA adapters instead
+        self.USE_LORA = True  # Set True to train LoRA adapters instead
         self.LORA_RANK = 2
         self.LORA_ALPHA = 4
         self.LORA_DROPOUT = 0.2
