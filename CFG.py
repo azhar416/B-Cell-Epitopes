@@ -18,8 +18,8 @@ class CFG:
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
         self.USE_LORA = True  # Set True to train LoRA adapters instead
-        self.LORA_RANK = 2
-        self.LORA_ALPHA = 4
+        self.LORA_RANK = 4
+        self.LORA_ALPHA = 8
         self.LORA_DROPOUT = 0.2
         self.LORA_TARGET_MODULES = ("query", "value")
         self.FEATURE_COLUMNS = (
@@ -41,10 +41,10 @@ class CFG:
         self.EARLY_STOPPING_PATIENCE = 10
         self.EARLY_STOPPING_MIN_DELTA = 0.001
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
-        self.LORA_LEARNING_RATE = 2e-4
+        self.LORA_LEARNING_RATE = 1e-4
         self.HEAD_LEARNING_RATE = 1e-4
         self.WEIGHT_DECAY = 0.01
-        self.LOSS_FUNCTION = "bce"  # "binary_focal" or "bce"
+        self.LOSS_FUNCTION = "binary_focal"  # "binary_focal" or "bce"
         self.FOCAL_ALPHA = 0.75
         self.FOCAL_GAMMA = 2.0
         self.PREDICTION_THRESHOLD = 0.5

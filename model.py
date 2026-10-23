@@ -47,9 +47,9 @@ class ProteinTransformerForClassification(nn.Module):
             raise ValueError("feature_dim must be non-negative.")
         self.feature_dim = feature_dim
         self.classifier = nn.Sequential(
-            nn.Dropout(p=0.3),
+            nn.Dropout(p=0.5),
             nn.Linear(hidden_size + feature_dim, hidden_size // 2),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(p=0.3),
             nn.Linear(hidden_size // 2, 1),
             nn.Sigmoid(),
