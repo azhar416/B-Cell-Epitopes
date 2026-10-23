@@ -161,7 +161,6 @@ def train_model(
         raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
     model = model or model_classes[model_type](
         model_name=cfg.MODEL_NAME,
-        dropout=cfg.DROPOUT,
         use_lora=cfg.USE_LORA,
         lora_rank=cfg.LORA_RANK,
         lora_alpha=cfg.LORA_ALPHA,
@@ -488,7 +487,6 @@ def _save_checkpoint(
             "history": history,
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
-            "dropout": cfg.DROPOUT,
             "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,
             "use_lora": cfg.USE_LORA,

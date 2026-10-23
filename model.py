@@ -4,13 +4,12 @@ from transformers import AutoModel, BertConfig
 
 
 class ProteinTransformerForClassification(nn.Module):
-    """Protein language model encoder with a binary classification head."""
+    """Protein language model encoder with a linear binary classification head."""
 
     def __init__(
         self,
         model_name,
         model_config=None,
-        dropout=0.3,
         use_lora=False,
         lora_rank=8,
         lora_alpha=16,
@@ -44,11 +43,7 @@ class ProteinTransformerForClassification(nn.Module):
 
         hidden_size = self.bert.config.hidden_size
         self.classifier = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, 1),
+            nn.Linear(hidden_size, 1),
             nn.Sigmoid(),
         )
 

@@ -14,11 +14,10 @@ class CFG:
         self.MODEL_TYPE = "protbert"  # choose "protbert" or "esm2"
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t6_8M_UR50D"
-        self.DROPOUT = 0.3
         self.MAX_LENGTH = 32
         self.USE_MULTI_GPU = True
-        self.FREEZE_ENCODER = True # True to freeze ProtBert encoder, False to fine-tune it
-        self.USE_LORA = True # True to use LoRA, False to not use it
+        self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
+        self.USE_LORA = False  # Set True to train LoRA adapters instead
         self.LORA_RANK = 2
         self.LORA_ALPHA = 4
         self.LORA_DROPOUT = 0.2
@@ -35,7 +34,7 @@ class CFG:
         self.LORA_LEARNING_RATE = 2e-4
         self.HEAD_LEARNING_RATE = 1e-4
         self.WEIGHT_DECAY = 0.01
-        self.LOSS_FUNCTION = "binary_focal"  # "binary_focal" or "bce"
+        self.LOSS_FUNCTION = "bce"  # "binary_focal" or "bce"
         self.FOCAL_ALPHA = 0.75
         self.FOCAL_GAMMA = 2.0
         self.PREDICTION_THRESHOLD = 0.5
