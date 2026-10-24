@@ -23,13 +23,9 @@ class CFG:
         self.LORA_DROPOUT = 0.2
         self.LORA_TARGET_MODULES = ("query", "value")
 
-        self.TRAIN_SIZE = 0.7
-        self.VALIDATION_SIZE = 0.10
-        self.TEST_SIZE = 0.20
+        self.N_SPLITS = 5  # Five folds give an 80:20 train/evaluation ratio.
         self.BATCH_SIZE = 32
         self.EPOCHS = 3 if self.DEBUG else 100
-        self.EARLY_STOPPING_PATIENCE = 10
-        self.EARLY_STOPPING_MIN_DELTA = 0.001
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
         self.LORA_LEARNING_RATE = 1e-4
         self.HEAD_LEARNING_RATE = 1e-4

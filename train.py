@@ -5,10 +5,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 from CFG import CFG
+from dataset import stratified_kfold_indices
 from model import ESM2ForClassification, ProtBertForClassification
 import oversampling
 
@@ -84,6 +85,24 @@ def _make_loader(dataset, cfg, shuffle, device):
     )
 
 
+def _build_model(cfg):
+    model_classes = {
+        "protbert": ProtBertForClassification,
+        "esm2": ESM2ForClassification,
+    }
+    model_type = cfg.MODEL_TYPE.lower()
+    if model_type not in model_classes:
+        raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
+    return model_classes[model_type](
+        model_name=cfg.MODEL_NAME,
+        use_lora=cfg.USE_LORA,
+        lora_rank=cfg.LORA_RANK,
+        lora_alpha=cfg.LORA_ALPHA,
+        lora_dropout=cfg.LORA_DROPOUT,
+        lora_target_modules=cfg.LORA_TARGET_MODULES,
+    )
+
+
 def _binary_metrics(targets, probabilities, threshold):
     targets = np.concatenate(targets).astype(np.int64, copy=False)
     probabilities = np.concatenate(probabilities)
@@ -137,45 +156,26 @@ def train_model(
     cfg=None,
     model=None,
     device=None,
-    validation_dataset=None,
+    checkpoint_path=None,
+    seed=None,
 ):
-    """Train a protein language model with validation-AUC early stopping."""
+    """Train a protein language model for the configured number of epochs."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
     if cfg.BATCH_SIZE < 1:
         raise ValueError("BATCH_SIZE must be at least 1.")
-    if validation_dataset is None or len(validation_dataset) == 0:
-        raise ValueError("A non-empty validation_dataset is required.")
-    if cfg.EARLY_STOPPING_PATIENCE < 1:
-        raise ValueError("EARLY_STOPPING_PATIENCE must be at least 1.")
-    if cfg.EARLY_STOPPING_MIN_DELTA < 0:
-        raise ValueError("EARLY_STOPPING_MIN_DELTA must be non-negative.")
 
-    set_seed(cfg.SEED)
+    set_seed(cfg.SEED if seed is None else seed)
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model_type = cfg.MODEL_TYPE.lower()
-    model_classes = {
-        "protbert": ProtBertForClassification,
-        "esm2": ESM2ForClassification,
-    }
-    if model_type not in model_classes:
-        raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
     if len(train_dataset) == 0:
         raise ValueError("A non-empty train_dataset is required.")
     print("Training configuration:")
     print(f"  Model: {cfg.MODEL_TYPE} ({cfg.MODEL_NAME})")
     print(f"  Dataset: {cfg.DATASET_NAME}")
-    print(
-        "  Split sizes: "
-        f"train={cfg.TRAIN_SIZE:.0%}, "
-        f"validation={cfg.VALIDATION_SIZE:.0%}, "
-        f"test={cfg.TEST_SIZE:.0%} "
-        f"(examples: train={len(train_dataset):,}, "
-        f"validation={len(validation_dataset):,})"
-    )
+    print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
     if cfg.LOSS_FUNCTION.lower() == "binary_focal":
         print(
@@ -198,14 +198,7 @@ def train_model(
     )
     print(f"  Epochs: {cfg.EPOCHS}")
 
-    model = model or model_classes[model_type](
-        model_name=cfg.MODEL_NAME,
-        use_lora=cfg.USE_LORA,
-        lora_rank=cfg.LORA_RANK,
-        lora_alpha=cfg.LORA_ALPHA,
-        lora_dropout=cfg.LORA_DROPOUT,
-        lora_target_modules=cfg.LORA_TARGET_MODULES,
-    )
+    model = model or _build_model(cfg)
     if isinstance(model, nn.DataParallel):
         model = model.module
     print("Model architecture:")
@@ -260,7 +253,7 @@ def train_model(
         original_size = len(train_dataset)
         train_dataset = oversampling.oversample_training_dataset(
             train_dataset,
-            random_state=cfg.SEED,
+            random_state=cfg.SEED if seed is None else seed,
         )
         print(
             "Training-only random oversampling enabled: "
@@ -269,12 +262,6 @@ def train_model(
     else:
         print("Training-only random oversampling disabled.")
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
-    validation_loader = _make_loader(
-        validation_dataset,
-        cfg,
-        shuffle=False,
-        device=device,
-    )
     criterion = _build_loss_function(cfg)
 
     encoder_parameters = [
@@ -326,11 +313,7 @@ def train_model(
 
     base_model = model.module if isinstance(model, nn.DataParallel) else model
     history = []
-    best_auc = float("-inf")
-    best_validation_loss = float("inf")
-    best_epoch = 0
-    epochs_without_auc_improvement = 0
-    checkpoint_path = Path(cfg.CHECKPOINT_PATH)
+    checkpoint_path = Path(checkpoint_path or cfg.CHECKPOINT_PATH)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(cfg.EPOCHS):
@@ -388,37 +371,6 @@ def train_model(
             epoch_probabilities,
             cfg.PREDICTION_THRESHOLD,
         )
-        validation_metrics = _evaluate_dataset(
-            model=model,
-            data_loader=validation_loader,
-            criterion=criterion,
-            cfg=cfg,
-            device=device,
-        )
-        validation_auc = validation_metrics["auc"]
-        validation_loss = validation_metrics["loss"]
-        if not np.isfinite(validation_auc):
-            raise ValueError(
-                "Validation data must contain both target classes to monitor AUC."
-            )
-        auc_improved = validation_auc > best_auc + cfg.EARLY_STOPPING_MIN_DELTA
-        auc_tied_with_better_loss = (
-            best_epoch > 0
-            and validation_auc == best_auc
-            and validation_loss < best_validation_loss
-        )
-        if auc_improved:
-            best_auc = validation_auc
-            best_validation_loss = validation_loss
-            best_epoch = epoch + 1
-            epochs_without_auc_improvement = 0
-        elif auc_tied_with_better_loss:
-            best_validation_loss = validation_loss
-            best_epoch = epoch + 1
-            epochs_without_auc_improvement += 1
-        else:
-            epochs_without_auc_improvement += 1
-
         history.append(
             {
                 "epoch": epoch + 1,
@@ -427,53 +379,120 @@ def train_model(
                 "train_recall": metrics["recall"],
                 "train_precision": metrics["precision"],
                 "train_accuracy": metrics["accuracy"],
-                "validation_loss": validation_loss,
-                "validation_auc": validation_auc,
-                "validation_recall": validation_metrics["recall"],
-                "validation_precision": validation_metrics["precision"],
-                "validation_accuracy": validation_metrics["accuracy"],
             }
         )
         print(
             f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
             f"train_loss: {epoch_loss:.4f}, "
             f"train_auc: {metrics['auc']:.4f}, "
-            f"val_loss: {validation_loss:.4f}, "
-            f"val_auc: {validation_auc:.4f}, "
-            f"val_recall: {validation_metrics['recall']:.4f}, "
-            f"val_precision: {validation_metrics['precision']:.4f}, "
-            f"val_accuracy: {validation_metrics['accuracy']:.4f}"
+            f"train_recall: {metrics['recall']:.4f}, "
+            f"train_precision: {metrics['precision']:.4f}, "
+            f"train_accuracy: {metrics['accuracy']:.4f}"
         )
-        if auc_improved or auc_tied_with_better_loss:
-            _save_checkpoint(
-                checkpoint_path=checkpoint_path,
-                model=base_model,
-                optimizer=optimizer,
-                history=history,
-                cfg=cfg,
-                best_epoch=best_epoch,
-                best_validation_auc=best_auc,
-                best_validation_loss=best_validation_loss,
-            )
-        if epochs_without_auc_improvement >= cfg.EARLY_STOPPING_PATIENCE:
-            print(
-                "Early stopping after "
-                f"{epoch + 1} epochs; best validation AUC "
-                f"{best_auc:.4f} at epoch {best_epoch}."
-            )
-            break
-
-    best_checkpoint = torch.load(
+    torch.save(
+        {
+            "model_state_dict": base_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "history": history,
+            "model_name": cfg.MODEL_NAME,
+            "model_type": cfg.MODEL_TYPE,
+            "loss_function": cfg.LOSS_FUNCTION,
+            "freeze_encoder": cfg.FREEZE_ENCODER,
+            "use_lora": cfg.USE_LORA,
+            "lora_rank": cfg.LORA_RANK if cfg.USE_LORA else None,
+            "lora_alpha": cfg.LORA_ALPHA if cfg.USE_LORA else None,
+            "lora_dropout": cfg.LORA_DROPOUT if cfg.USE_LORA else None,
+            "lora_target_modules": (
+                cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
+            ),
+            "epochs_trained": len(history),
+        },
         checkpoint_path,
-        map_location=device,
-        weights_only=True,
     )
-    base_model.load_state_dict(best_checkpoint["model_state_dict"])
-    best_checkpoint["history"] = history
-    torch.save(best_checkpoint, checkpoint_path)
     print(f"Saved checkpoint to {checkpoint_path}")
-    print(f"Restored best model from epoch {best_epoch} (validation AUC {best_auc:.4f}).")
     return model, history
+
+
+def cross_validate_model(
+    dataset,
+    cfg=None,
+    device=None,
+    n_splits=None,
+    model_factory=None,
+):
+    """Train and evaluate a fresh model in each stratified row-level fold."""
+    cfg = cfg or CFG()
+    if not hasattr(dataset, "labels"):
+        raise TypeError("dataset must expose a labels attribute.")
+    n_splits = cfg.N_SPLITS if n_splits is None else n_splits
+    labels = dataset.labels.detach().cpu().numpy().reshape(-1)
+    folds = stratified_kfold_indices(
+        labels,
+        n_splits=n_splits,
+        random_state=cfg.SEED,
+    )
+    base_checkpoint = Path(cfg.CHECKPOINT_PATH)
+    fold_metrics = []
+    for fold_number, (train_indices, evaluation_indices) in enumerate(folds, 1):
+        print(
+            f"\nFold {fold_number}/{n_splits}: "
+            f"train={len(train_indices):,} ({len(train_indices) / len(dataset):.0%}), "
+            f"evaluation={len(evaluation_indices):,} "
+            f"({len(evaluation_indices) / len(dataset):.0%})"
+        )
+        train_subset = Subset(dataset, train_indices.tolist())
+        evaluation_subset = Subset(dataset, evaluation_indices.tolist())
+        fold_checkpoint = base_checkpoint.with_name(
+            f"{base_checkpoint.stem}_fold_{fold_number}{base_checkpoint.suffix}"
+        )
+        model, _ = train_model(
+            train_dataset=train_subset,
+            cfg=cfg,
+            model=model_factory() if model_factory is not None else None,
+            device=device,
+            checkpoint_path=fold_checkpoint,
+            seed=cfg.SEED + fold_number - 1,
+        )
+        evaluation = _evaluate_dataset(
+            model=model,
+            data_loader=_make_loader(
+                evaluation_subset,
+                cfg,
+                shuffle=False,
+                device=torch.device(
+                    device or ("cuda" if torch.cuda.is_available() else "cpu")
+                ),
+            ),
+            criterion=_build_loss_function(cfg),
+            cfg=cfg,
+            device=torch.device(
+                device or ("cuda" if torch.cuda.is_available() else "cpu")
+            ),
+        )
+        precision = evaluation["precision"]
+        recall = evaluation["recall"]
+        evaluation["f1"] = (
+            2 * precision * recall / max(precision + recall, 1e-12)
+        )
+        fold_metrics.append({"fold": fold_number, **evaluation})
+
+    metric_names = ("loss", "auc", "accuracy", "precision", "recall", "f1")
+    mean_metrics = {
+        name: float(np.mean([fold[name] for fold in fold_metrics]))
+        for name in metric_names
+    }
+    std_metrics = {
+        name: float(np.std([fold[name] for fold in fold_metrics], ddof=1))
+        for name in metric_names
+    }
+    print("\nStratified k-fold results:")
+    for name in metric_names:
+        print(f"  {name}: {mean_metrics[name]:.4f} +/- {std_metrics[name]:.4f}")
+    return {
+        "fold_metrics": fold_metrics,
+        "mean_metrics": mean_metrics,
+        "std_metrics": std_metrics,
+    }
 
 
 def _evaluate_dataset(model, data_loader, criterion, cfg, device):
@@ -510,42 +529,8 @@ def _evaluate_dataset(model, data_loader, criterion, cfg, device):
     }
 
 
-def _save_checkpoint(
-    checkpoint_path,
-    model,
-    optimizer,
-    history,
-    cfg,
-    best_epoch,
-    best_validation_auc,
-    best_validation_loss,
-):
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "history": history,
-            "model_name": cfg.MODEL_NAME,
-            "model_type": cfg.MODEL_TYPE,
-            "loss_function": cfg.LOSS_FUNCTION,
-            "freeze_encoder": cfg.FREEZE_ENCODER,
-            "use_lora": cfg.USE_LORA,
-            "lora_rank": cfg.LORA_RANK if cfg.USE_LORA else None,
-            "lora_alpha": cfg.LORA_ALPHA if cfg.USE_LORA else None,
-            "lora_dropout": cfg.LORA_DROPOUT if cfg.USE_LORA else None,
-            "lora_target_modules": (
-                cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
-            ),
-            "best_epoch": best_epoch,
-            "best_validation_auc": best_validation_auc,
-            "best_validation_loss": best_validation_loss,
-        },
-        checkpoint_path,
-    )
-
-
 def evaluate_model(model, test_dataset, cfg=None, device=None):
-    """Evaluate a trained model once on the held-out test dataset."""
+    """Evaluate a trained model on a dataset."""
     cfg = cfg or CFG()
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -576,59 +561,35 @@ def evaluate_model(model, test_dataset, cfg=None, device=None):
     }
 
 
-def plot_training_results(history, test_metrics, save_path=None):
-    """Plot epoch training metrics alongside final held-out test metrics."""
-    if not history:
-        raise ValueError("history must contain at least one training epoch.")
+def plot_cross_validation_results(results, save_path=None):
+    """Plot each fold's metrics with the cross-validation mean."""
+    fold_metrics = results.get("fold_metrics", [])
+    if not fold_metrics:
+        raise ValueError("results must contain fold metrics.")
 
-    metric_specs = (
-        ("loss", "train_loss", "validation_loss", "test_loss", "Loss"),
-        ("auc", "train_auc", "validation_auc", "auc", "AUC"),
-        ("precision", "train_precision", "validation_precision", "precision", "Precision"),
-        ("recall", "train_recall", "validation_recall", "recall", "Recall"),
-        ("accuracy", "train_accuracy", "validation_accuracy", "accuracy", "Accuracy"),
-    )
-    epochs = [item["epoch"] for item in history]
-    figure, axes = plt.subplots(2, 3, figsize=(15, 8))
-
-    for axis, (key, train_key, validation_key, test_key, title) in zip(
-        axes.flat,
-        metric_specs,
-    ):
-        train_values = [item[train_key] for item in history]
-        validation_values = [item[validation_key] for item in history]
-        test_value = test_metrics.get(test_key)
-        axis.plot(epochs, train_values, marker="o", markersize=3, label="Train")
-        axis.plot(
-            epochs,
-            validation_values,
-            marker="o",
-            markersize=3,
-            label="Validation",
+    metric_names = ("loss", "auc", "precision", "recall", "accuracy", "f1")
+    figure, axes = plt.subplots(1, len(metric_names), figsize=(17, 4))
+    for axis, name in zip(axes, metric_names):
+        values = [fold[name] for fold in fold_metrics]
+        axis.bar(range(1, len(values) + 1), values, color="steelblue")
+        axis.axhline(
+            results["mean_metrics"][name],
+            color="darkorange",
+            linestyle="--",
+            label="Mean",
         )
-        if test_value is not None and np.isfinite(test_value):
-            axis.scatter(
-                [epochs[-1]],
-                [test_value],
-                marker="X",
-                s=90,
-                label="Test (final)",
-                zorder=3,
-            )
-        axis.set_title(title)
-        axis.set_xlabel("Epoch")
-        axis.grid(True, alpha=0.3)
+        axis.set_title(name.capitalize())
+        axis.set_xlabel("Fold")
+        axis.set_xticks(range(1, len(values) + 1))
+        axis.grid(axis="y", alpha=0.3)
         axis.legend()
-        if key != "loss":
+        if name != "loss":
             axis.set_ylim(0, 1)
 
-    axes.flat[-1].axis("off")
-    figure.suptitle("Training history and final held-out test metrics")
+    figure.suptitle("Stratified k-fold cross-validation")
     figure.tight_layout()
-
     if save_path is not None:
         output_path = Path(save_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output_path, dpi=150, bbox_inches="tight")
-
     return figure, axes

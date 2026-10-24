@@ -5,10 +5,10 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from CFG import CFG
-from dataset import prepare_dataset_frames
+from dataset import prepare_dataset_frames, stratified_kfold_indices
 from train import _binary_metrics, _build_loss_function
 import oversampling
 
@@ -138,23 +138,16 @@ def set_seed(seed):
 
 
 def prepare_cnn_datasets(cfg=None, data_dir=None):
-    """Prepare CNN inputs from the exact grouped split used by dataset.py."""
+    """Prepare CNN inputs for row-level stratified cross-validation."""
     cfg = cfg or CFG()
     if data_dir is None:
         configured_path = Path(cfg._DATASET_PATH)
         data_dir = configured_path if configured_path.exists() else "dataset"
-    frames = prepare_dataset_frames(
+    dataframe = prepare_dataset_frames(
         dataset_name=cfg.DATASET_NAME,
         data_dir=data_dir,
-        train_size=cfg.TRAIN_SIZE,
-        validation_size=cfg.VALIDATION_SIZE,
-        test_size=cfg.TEST_SIZE,
-        random_state=cfg.SEED,
     )
-    return tuple(
-        CNNPeptideDataset(frame, max_length=cfg.MAX_LENGTH)
-        for frame in frames
-    )
+    return CNNPeptideDataset(dataframe, max_length=cfg.MAX_LENGTH)
 
 
 def _evaluate(model, loader, criterion, cfg, device):
@@ -190,24 +183,20 @@ def _evaluate(model, loader, criterion, cfg, device):
 
 def train_cnn(
     train_dataset,
-    validation_dataset,
     cfg=None,
     model=None,
     device=None,
     checkpoint_path="checkpoints/1dcnn_classifier.pt",
+    seed=None,
 ):
-    """Train with the project's validation-AUC early-stopping settings."""
+    """Train a CNN for the configured number of epochs."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1 or cfg.BATCH_SIZE < 1:
         raise ValueError("EPOCHS and BATCH_SIZE must be at least 1.")
-    if not len(train_dataset) or not len(validation_dataset):
-        raise ValueError("Training and validation datasets must be non-empty.")
-    if cfg.EARLY_STOPPING_PATIENCE < 1:
-        raise ValueError("EARLY_STOPPING_PATIENCE must be at least 1.")
-    if cfg.EARLY_STOPPING_MIN_DELTA < 0:
-        raise ValueError("EARLY_STOPPING_MIN_DELTA must be non-negative.")
+    if not len(train_dataset):
+        raise ValueError("Training dataset must be non-empty.")
 
-    set_seed(cfg.SEED)
+    set_seed(cfg.SEED if seed is None else seed)
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -218,7 +207,7 @@ def train_cnn(
         original_size = len(train_dataset)
         train_dataset = oversampling.oversample_training_dataset(
             train_dataset,
-            random_state=cfg.SEED,
+            random_state=cfg.SEED if seed is None else seed,
         )
         print(
             "Training-only random oversampling enabled: "
@@ -232,13 +221,6 @@ def train_cnn(
         num_workers=cfg.NUM_WORKERS,
         pin_memory=device.type == "cuda",
     )
-    validation_loader = DataLoader(
-        validation_dataset,
-        batch_size=cfg.BATCH_SIZE,
-        shuffle=False,
-        num_workers=cfg.NUM_WORKERS,
-        pin_memory=device.type == "cuda",
-    )
     criterion = _build_loss_function(cfg)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -249,10 +231,6 @@ def train_cnn(
     output_path = Path(checkpoint_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     history = []
-    best_auc = float("-inf")
-    best_validation_loss = float("inf")
-    best_epoch = 0
-    epochs_without_improvement = 0
 
     for epoch in range(cfg.EPOCHS):
         model.train()
@@ -277,81 +255,108 @@ def train_cnn(
             total_loss += loss.item() * labels.size(0)
             example_count += labels.size(0)
 
-        validation_metrics = _evaluate(
-            model,
-            validation_loader,
-            criterion,
-            cfg,
-            device,
-        )
-        validation_auc = validation_metrics["auc"]
-        if not np.isfinite(validation_auc):
-            raise ValueError(
-                "Validation data must contain both target classes to monitor AUC."
-            )
         epoch_record = {
             "epoch": epoch + 1,
             "train_loss": total_loss / example_count,
-            "validation_loss": validation_metrics["loss"],
-            "validation_auc": validation_auc,
-            "validation_precision": validation_metrics["precision"],
-            "validation_recall": validation_metrics["recall"],
-            "validation_accuracy": validation_metrics["accuracy"],
         }
         history.append(epoch_record)
         print(
             f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
-            f"train_loss: {epoch_record['train_loss']:.4f}, "
-            f"val_loss: {validation_metrics['loss']:.4f}, "
-            f"val_auc: {validation_auc:.4f}"
+            f"train_loss: {epoch_record['train_loss']:.4f}"
         )
-
-        improved = validation_auc > best_auc + cfg.EARLY_STOPPING_MIN_DELTA
-        tied_with_better_loss = (
-            best_epoch > 0
-            and validation_auc == best_auc
-            and validation_metrics["loss"] < best_validation_loss
-        )
-        if improved or tied_with_better_loss:
-            best_auc = validation_auc
-            best_validation_loss = validation_metrics["loss"]
-            best_epoch = epoch + 1
-            epochs_without_improvement = (
-                0 if improved else epochs_without_improvement + 1
-            )
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "history": history,
-                    "best_epoch": best_epoch,
-                    "best_validation_auc": best_auc,
-                    "best_validation_loss": best_validation_loss,
-                    "model_type": "1dcnn",
-                    "max_length": cfg.MAX_LENGTH,
-                },
-                output_path,
-            )
-        else:
-            epochs_without_improvement += 1
-
-        if epochs_without_improvement >= cfg.EARLY_STOPPING_PATIENCE:
-            print(
-                f"Early stopping; best validation AUC {best_auc:.4f} "
-                f"at epoch {best_epoch}."
-            )
-            break
-
-    checkpoint = torch.load(output_path, map_location=device, weights_only=True)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    print(
-        f"Restored best model from epoch {best_epoch} "
-        f"(validation AUC {best_auc:.4f}); checkpoint: {output_path}"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "history": history,
+            "epochs_trained": len(history),
+            "model_type": "1dcnn",
+            "max_length": cfg.MAX_LENGTH,
+        },
+        output_path,
     )
+    print(f"Saved checkpoint to {output_path}")
     return model, history
 
 
+def cross_validate_cnn(
+    dataset,
+    cfg=None,
+    device=None,
+    n_splits=None,
+    model_factory=CNN1DForClassification,
+    checkpoint_path="checkpoints/1dcnn_classifier.pt",
+):
+    """Train and evaluate a fresh CNN in each stratified row-level fold."""
+    cfg = cfg or CFG()
+    n_splits = cfg.N_SPLITS if n_splits is None else n_splits
+    folds = stratified_kfold_indices(
+        dataset.labels.detach().cpu().numpy(),
+        n_splits=n_splits,
+        random_state=cfg.SEED,
+    )
+    base_checkpoint = Path(checkpoint_path)
+    fold_metrics = []
+    evaluation_device = torch.device(
+        device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    for fold_number, (train_indices, evaluation_indices) in enumerate(folds, 1):
+        print(
+            f"\nFold {fold_number}/{n_splits}: "
+            f"train={len(train_indices):,} ({len(train_indices) / len(dataset):.0%}), "
+            f"evaluation={len(evaluation_indices):,} "
+            f"({len(evaluation_indices) / len(dataset):.0%})"
+        )
+        fold_checkpoint = base_checkpoint.with_name(
+            f"{base_checkpoint.stem}_fold_{fold_number}{base_checkpoint.suffix}"
+        )
+        model, _ = train_cnn(
+            train_dataset=Subset(dataset, train_indices.tolist()),
+            cfg=cfg,
+            model=model_factory(),
+            device=device,
+            checkpoint_path=fold_checkpoint,
+            seed=cfg.SEED + fold_number - 1,
+        )
+        evaluation_loader = DataLoader(
+            Subset(dataset, evaluation_indices.tolist()),
+            batch_size=cfg.BATCH_SIZE,
+            shuffle=False,
+            num_workers=cfg.NUM_WORKERS,
+            pin_memory=evaluation_device.type == "cuda",
+        )
+        metrics = _evaluate(
+            model.to(evaluation_device),
+            evaluation_loader,
+            _build_loss_function(cfg),
+            cfg,
+            evaluation_device,
+        )
+        precision = metrics["precision"]
+        recall = metrics["recall"]
+        metrics["f1"] = 2 * precision * recall / max(precision + recall, 1e-12)
+        fold_metrics.append({"fold": fold_number, **metrics})
+
+    metric_names = ("loss", "auc", "accuracy", "precision", "recall", "f1")
+    mean_metrics = {
+        name: float(np.mean([fold[name] for fold in fold_metrics]))
+        for name in metric_names
+    }
+    std_metrics = {
+        name: float(np.std([fold[name] for fold in fold_metrics], ddof=1))
+        for name in metric_names
+    }
+    print("\nStratified k-fold results:")
+    for name in metric_names:
+        print(f"  {name}: {mean_metrics[name]:.4f} +/- {std_metrics[name]:.4f}")
+    return {
+        "fold_metrics": fold_metrics,
+        "mean_metrics": mean_metrics,
+        "std_metrics": std_metrics,
+    }
+
+
 def evaluate_cnn(model, test_dataset, cfg=None, device=None):
-    """Evaluate the trained CNN once on the held-out test split."""
+    """Evaluate a trained CNN on a dataset."""
     cfg = cfg or CFG()
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -385,16 +390,8 @@ def evaluate_cnn(model, test_dataset, cfg=None, device=None):
 
 def main():
     cfg = CFG()
-    train_dataset, validation_dataset, test_dataset = prepare_cnn_datasets(cfg)
-    model, _ = train_cnn(
-        train_dataset,
-        validation_dataset,
-        cfg=cfg,
-    )
-    test_metrics = evaluate_cnn(model, test_dataset, cfg=cfg)
-    print("Held-out test metrics:")
-    for name, value in test_metrics.items():
-        print(f"  {name}: {value}")
+    dataset = prepare_cnn_datasets(cfg)
+    cross_validate_cnn(dataset, cfg=cfg)
 
 
 if __name__ == "__main__":
