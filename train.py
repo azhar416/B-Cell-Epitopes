@@ -158,8 +158,11 @@ def train_model(
     device=None,
     checkpoint_path=None,
     seed=None,
+    validation_dataset=None,
+    fold_number=None,
+    n_splits=None,
 ):
-    """Train a protein language model for the configured number of epochs."""
+    """Train for fixed epochs and optionally log validation metrics each epoch."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
@@ -262,6 +265,11 @@ def train_model(
     else:
         print("Training-only random oversampling disabled.")
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
+    validation_loader = (
+        _make_loader(validation_dataset, cfg, shuffle=False, device=device)
+        if validation_dataset is not None
+        else None
+    )
     criterion = _build_loss_function(cfg)
 
     encoder_parameters = [
@@ -326,7 +334,11 @@ def train_model(
         epoch_probabilities = []
         progress_bar = tqdm(
             train_loader,
-            desc=f"Epoch {epoch + 1}/{cfg.EPOCHS}",
+            desc=(
+                f"Fold {fold_number}/{n_splits} | Epoch {epoch + 1}/{cfg.EPOCHS}"
+                if fold_number is not None
+                else f"Epoch {epoch + 1}/{cfg.EPOCHS}"
+            ),
             unit="batch",
         )
         for batch in progress_bar:
@@ -371,23 +383,59 @@ def train_model(
             epoch_probabilities,
             cfg.PREDICTION_THRESHOLD,
         )
-        history.append(
-            {
-                "epoch": epoch + 1,
-                "train_loss": epoch_loss,
-                "train_auc": metrics["auc"],
-                "train_recall": metrics["recall"],
-                "train_precision": metrics["precision"],
-                "train_accuracy": metrics["accuracy"],
-            }
+        epoch_record = {
+            "epoch": epoch + 1,
+            "train_loss": epoch_loss,
+            "train_auc": metrics["auc"],
+            "train_recall": metrics["recall"],
+            "train_precision": metrics["precision"],
+            "train_accuracy": metrics["accuracy"],
+        }
+        validation_metrics = None
+        if validation_loader is not None:
+            validation_metrics = _evaluate_dataset(
+                model=model,
+                data_loader=validation_loader,
+                criterion=criterion,
+                cfg=cfg,
+                device=device,
+            )
+            epoch_record.update(
+                {
+                    f"validation_{name}": validation_metrics[name]
+                    for name in (
+                        "loss",
+                        "auc",
+                        "recall",
+                        "precision",
+                        "accuracy",
+                    )
+                }
+            )
+        history.append(epoch_record)
+        fold_label = (
+            f"Fold {fold_number}/{n_splits} | "
+            if fold_number is not None
+            else ""
         )
         print(
-            f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
+            f"{fold_label}Epoch {epoch + 1}/{cfg.EPOCHS} - "
             f"train_loss: {epoch_loss:.4f}, "
             f"train_auc: {metrics['auc']:.4f}, "
             f"train_recall: {metrics['recall']:.4f}, "
             f"train_precision: {metrics['precision']:.4f}, "
             f"train_accuracy: {metrics['accuracy']:.4f}"
+            + (
+                ""
+                if validation_metrics is None
+                else (
+                    f", validation_loss: {validation_metrics['loss']:.4f}, "
+                    f"validation_auc: {validation_metrics['auc']:.4f}, "
+                    f"validation_recall: {validation_metrics['recall']:.4f}, "
+                    f"validation_precision: {validation_metrics['precision']:.4f}, "
+                    f"validation_accuracy: {validation_metrics['accuracy']:.4f}"
+                )
+            )
         )
     torch.save(
         {
@@ -452,6 +500,9 @@ def cross_validate_model(
             device=device,
             checkpoint_path=fold_checkpoint,
             seed=cfg.SEED + fold_number - 1,
+            validation_dataset=evaluation_subset,
+            fold_number=fold_number,
+            n_splits=n_splits,
         )
         evaluation = _evaluate_dataset(
             model=model,

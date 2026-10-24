@@ -188,8 +188,11 @@ def train_cnn(
     device=None,
     checkpoint_path="checkpoints/1dcnn_classifier.pt",
     seed=None,
+    validation_dataset=None,
+    fold_number=None,
+    n_splits=None,
 ):
-    """Train a CNN for the configured number of epochs."""
+    """Train for fixed epochs and optionally log validation metrics each epoch."""
     cfg = cfg or CFG()
     if cfg.EPOCHS < 1 or cfg.BATCH_SIZE < 1:
         raise ValueError("EPOCHS and BATCH_SIZE must be at least 1.")
@@ -220,6 +223,17 @@ def train_cnn(
         shuffle=True,
         num_workers=cfg.NUM_WORKERS,
         pin_memory=device.type == "cuda",
+    )
+    validation_loader = (
+        DataLoader(
+            validation_dataset,
+            batch_size=cfg.BATCH_SIZE,
+            shuffle=False,
+            num_workers=cfg.NUM_WORKERS,
+            pin_memory=device.type == "cuda",
+        )
+        if validation_dataset is not None
+        else None
     )
     criterion = _build_loss_function(cfg)
     optimizer = torch.optim.AdamW(
@@ -259,10 +273,47 @@ def train_cnn(
             "epoch": epoch + 1,
             "train_loss": total_loss / example_count,
         }
+        validation_metrics = None
+        if validation_loader is not None:
+            validation_metrics = _evaluate(
+                model,
+                validation_loader,
+                criterion,
+                cfg,
+                device,
+            )
+            epoch_record.update(
+                {
+                    f"validation_{name}": validation_metrics[name]
+                    for name in (
+                        "loss",
+                        "auc",
+                        "recall",
+                        "precision",
+                        "accuracy",
+                    )
+                }
+            )
         history.append(epoch_record)
+        fold_label = (
+            f"Fold {fold_number}/{n_splits} | "
+            if fold_number is not None
+            else ""
+        )
         print(
-            f"Epoch {epoch + 1}/{cfg.EPOCHS} - "
+            f"{fold_label}Epoch {epoch + 1}/{cfg.EPOCHS} - "
             f"train_loss: {epoch_record['train_loss']:.4f}"
+            + (
+                ""
+                if validation_metrics is None
+                else (
+                    f", validation_loss: {validation_metrics['loss']:.4f}, "
+                    f"validation_auc: {validation_metrics['auc']:.4f}, "
+                    f"validation_recall: {validation_metrics['recall']:.4f}, "
+                    f"validation_precision: {validation_metrics['precision']:.4f}, "
+                    f"validation_accuracy: {validation_metrics['accuracy']:.4f}"
+                )
+            )
         )
     torch.save(
         {
@@ -316,6 +367,9 @@ def cross_validate_cnn(
             device=device,
             checkpoint_path=fold_checkpoint,
             seed=cfg.SEED + fold_number - 1,
+            validation_dataset=Subset(dataset, evaluation_indices.tolist()),
+            fold_number=fold_number,
+            n_splits=n_splits,
         )
         evaluation_loader = DataLoader(
             Subset(dataset, evaluation_indices.tolist()),
