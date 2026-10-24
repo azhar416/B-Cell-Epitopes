@@ -4,8 +4,13 @@ from copy import deepcopy
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from torch import nn
-from sklearn.metrics import average_precision_score
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_curve,
+)
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
@@ -172,6 +177,94 @@ def _binary_metrics(targets, probabilities, threshold):
             [true_negative, false_positive],
             [false_negative, true_positive],
         ],
+    }
+
+
+def _save_evaluation_plots(targets, probabilities, threshold, output_dir):
+    """Save validation ROC/precision-recall curves and a confusion-matrix heatmap."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    targets = np.asarray(targets, dtype=np.int64)
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    predictions = probabilities >= threshold
+    matrix = np.asarray(
+        [
+            [
+                np.count_nonzero((targets == 0) & ~predictions),
+                np.count_nonzero((targets == 0) & predictions),
+            ],
+            [
+                np.count_nonzero((targets == 1) & ~predictions),
+                np.count_nonzero((targets == 1) & predictions),
+            ],
+        ],
+        dtype=np.int64,
+    )
+
+    figure, axes = plt.subplots(1, 2, figsize=(12, 5))
+    false_positive_rate, true_positive_rate, _ = roc_curve(targets, probabilities)
+    roc_auc = _binary_metrics([targets], [probabilities], threshold)["auc"]
+    axes[0].plot(
+        false_positive_rate,
+        true_positive_rate,
+        label=f"ROC-AUC = {roc_auc:.3f}",
+        color="tab:blue",
+    )
+    axes[0].plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
+    axes[0].set(
+        xlabel="False positive rate",
+        ylabel="True positive rate",
+        title="Validation ROC curve",
+        xlim=(0, 1),
+        ylim=(0, 1.02),
+    )
+    axes[0].legend(loc="lower right")
+
+    precision, recall, _ = precision_recall_curve(targets, probabilities)
+    pr_auc = average_precision_score(targets, probabilities)
+    axes[1].plot(recall, precision, label=f"Average precision = {pr_auc:.3f}")
+    axes[1].set(
+        xlabel="Recall",
+        ylabel="Precision",
+        title="Validation precision-recall curve",
+        xlim=(0, 1),
+        ylim=(0, 1.02),
+    )
+    axes[1].legend(loc="best")
+    figure.tight_layout()
+    curves_path = output_dir / "evaluation_curves.png"
+    figure.savefig(curves_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(5.5, 4.5))
+    image = axis.imshow(matrix, cmap="Blues")
+    axis.set(
+        xticks=[0, 1],
+        yticks=[0, 1],
+        xticklabels=["Negative (0)", "Positive (1)"],
+        yticklabels=["Negative (0)", "Positive (1)"],
+        xlabel="Predicted label",
+        ylabel="True label",
+        title=f"Validation confusion matrix (threshold={threshold:g})",
+    )
+    midpoint = matrix.max() / 2 if matrix.size else 0
+    for row in range(2):
+        for column in range(2):
+            axis.text(
+                column,
+                row,
+                f"{matrix[row, column]:,}",
+                ha="center",
+                va="center",
+                color="white" if matrix[row, column] > midpoint else "black",
+            )
+    figure.colorbar(image, ax=axis, label="Examples")
+    figure.tight_layout()
+    matrix_path = output_dir / "confusion_matrix.png"
+    figure.savefig(matrix_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+    return {
+        "evaluation_curves": str(curves_path),
+        "confusion_matrix": str(matrix_path),
     }
 
 
@@ -590,6 +683,15 @@ def train_validation_split(
         criterion=_build_loss_function(cfg),
         cfg=cfg,
         device=evaluation_device,
+        return_predictions=True,
+    )
+    validation_targets = validation_metrics.pop("targets")
+    validation_probabilities = validation_metrics.pop("probabilities")
+    evaluation_plots = _save_evaluation_plots(
+        validation_targets,
+        validation_probabilities,
+        cfg.PREDICTION_THRESHOLD,
+        Path(cfg.CHECKPOINT_PATH).parent,
     )
     return {
         "model": model,
@@ -602,10 +704,18 @@ def train_validation_split(
             minlength=2,
         ),
         "validation_metrics": validation_metrics,
+        "evaluation_plots": evaluation_plots,
     }
 
 
-def _evaluate_dataset(model, data_loader, criterion, cfg, device):
+def _evaluate_dataset(
+    model,
+    data_loader,
+    criterion,
+    cfg,
+    device,
+    return_predictions=False,
+):
     model.eval()
     total_loss = 0.0
     example_count = 0
@@ -633,10 +743,14 @@ def _evaluate_dataset(model, data_loader, criterion, cfg, device):
         all_probabilities,
         cfg.PREDICTION_THRESHOLD,
     )
-    return {
+    results = {
         "loss": total_loss / example_count,
         **metrics,
     }
+    if return_predictions:
+        results["targets"] = np.concatenate(all_targets)
+        results["probabilities"] = np.concatenate(all_probabilities)
+    return results
 
 
 def evaluate_model(model, validation_dataset, cfg=None, device=None):

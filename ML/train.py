@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from joblib import dump
 from sklearn.metrics import (
     accuracy_score,
@@ -15,8 +16,10 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
     matthews_corrcoef,
+    precision_recall_curve,
     precision_score,
     recall_score,
+    roc_curve,
     roc_auc_score,
 )
 
@@ -50,6 +53,86 @@ def calculate_metrics(
     }
 
 
+def save_evaluation_plots(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    threshold: float,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Save validation ROC/precision-recall curves and a confusion-matrix heatmap."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions = (probabilities >= threshold).astype(int)
+    matrix = confusion_matrix(labels, predictions, labels=[0, 1])
+
+    figure, axes = plt.subplots(1, 2, figsize=(12, 5))
+    false_positive_rate, true_positive_rate, _ = roc_curve(labels, probabilities)
+    roc_auc = roc_auc_score(labels, probabilities)
+    axes[0].plot(
+        false_positive_rate,
+        true_positive_rate,
+        label=f"ROC-AUC = {roc_auc:.3f}",
+        color="tab:blue",
+    )
+    axes[0].plot([0, 1], [0, 1], linestyle="--", color="gray", label="Chance")
+    axes[0].set(
+        xlabel="False positive rate",
+        ylabel="True positive rate",
+        title="Validation ROC curve",
+        xlim=(0, 1),
+        ylim=(0, 1.02),
+    )
+    axes[0].legend(loc="lower right")
+
+    precision, recall, _ = precision_recall_curve(labels, probabilities)
+    pr_auc = average_precision_score(labels, probabilities)
+    axes[1].plot(recall, precision, label=f"Average precision = {pr_auc:.3f}")
+    axes[1].set(
+        xlabel="Recall",
+        ylabel="Precision",
+        title="Validation precision-recall curve",
+        xlim=(0, 1),
+        ylim=(0, 1.02),
+    )
+    axes[1].legend(loc="best")
+    figure.tight_layout()
+    curves_path = output_dir / "evaluation_curves.png"
+    figure.savefig(curves_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(5.5, 4.5))
+    image = axis.imshow(matrix, cmap="Blues")
+    axis.set(
+        xticks=[0, 1],
+        yticks=[0, 1],
+        xticklabels=["Negative (0)", "Positive (1)"],
+        yticklabels=["Negative (0)", "Positive (1)"],
+        xlabel="Predicted label",
+        ylabel="True label",
+        title=f"Validation confusion matrix (threshold={threshold:g})",
+    )
+    midpoint = matrix.max() / 2 if matrix.size else 0
+    for row in range(2):
+        for column in range(2):
+            axis.text(
+                column,
+                row,
+                f"{matrix[row, column]:,}",
+                ha="center",
+                va="center",
+                color="white" if matrix[row, column] > midpoint else "black",
+            )
+    figure.colorbar(image, ax=axis, label="Examples")
+    figure.tight_layout()
+    matrix_path = output_dir / "confusion_matrix.png"
+    figure.savefig(matrix_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+
+    return {
+        "evaluation_curves": str(curves_path),
+        "confusion_matrix": str(matrix_path),
+    }
+
+
 def run_training(config: CFG) -> dict[str, object]:
     """Train on a stratified 80% subset and evaluate on held-out validation data."""
     config.validate()
@@ -78,6 +161,12 @@ def run_training(config: CFG) -> dict[str, object]:
         labels[validation_indices],
         validation_probabilities,
         threshold=config.PREDICTION_THRESHOLD,
+    )
+    evaluation_plots = save_evaluation_plots(
+        labels[validation_indices],
+        validation_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+        output_dir=config.OUTPUT_DIR,
     )
     print(
         f"Train: {len(train_indices):,} ({len(train_indices) / len(dataframe):.0%}); "
@@ -130,6 +219,7 @@ def run_training(config: CFG) -> dict[str, object]:
         "train_class_counts": pd.Series(labels[train_indices]).value_counts().sort_index().to_dict(),
         "validation_class_counts": pd.Series(labels[validation_indices]).value_counts().sort_index().to_dict(),
         "validation_metrics": validation_metrics,
+        "evaluation_plots": evaluation_plots,
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in asdict(config).items()
