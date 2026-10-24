@@ -5,6 +5,15 @@ from torch.utils.data import Subset
 USE_OVERSAMPLING = False  # Set to False to disable oversampling of the training dataset
 
 
+def _labels_for_dataset(dataset):
+    if isinstance(dataset, Subset):
+        parent_labels = _labels_for_dataset(dataset.dataset)
+        return parent_labels[np.asarray(dataset.indices, dtype=np.int64)]
+    if not hasattr(dataset, "labels"):
+        raise TypeError("Training dataset must expose labels for oversampling.")
+    return dataset.labels.detach().cpu().numpy().reshape(-1)
+
+
 def oversample_training_dataset(dataset, random_state=42, enabled=None):
     """Randomly duplicate minority-class training examples to balance classes.
 
@@ -17,7 +26,7 @@ def oversample_training_dataset(dataset, random_state=42, enabled=None):
     if not enabled:
         return dataset
 
-    labels = dataset.labels.detach().cpu().numpy().reshape(-1)
+    labels = _labels_for_dataset(dataset)
     classes, class_counts = np.unique(labels, return_counts=True)
     if len(classes) != 2:
         raise ValueError(

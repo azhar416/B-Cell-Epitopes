@@ -1,17 +1,18 @@
 from pathlib import Path
 import random
+from copy import deepcopy
 
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
+from sklearn.metrics import average_precision_score
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from CFG import CFG
-from dataset import stratified_kfold_indices
-from model import ESM2ForClassification, ProtBertForClassification
-import oversampling
+from DL.CFG import CFG
+from DL.dataset import stratified_split_indices
+from DL.model import ESM2ForClassification, ProtBertForClassification
+import DL.oversampling as oversampling
 
 
 class BinaryFocalLoss(nn.Module):
@@ -139,11 +140,34 @@ def _binary_metrics(targets, probabilities, threshold):
     precision = true_positive / max(true_positive + false_positive, 1)
     recall = true_positive / max(positive_count, 1)
     accuracy = (true_positive + true_negative) / max(len(targets), 1)
+    specificity = true_negative / max(negative_count, 1)
+    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    mcc_denominator = np.sqrt(
+        (true_positive + false_positive)
+        * (true_positive + false_negative)
+        * (true_negative + false_positive)
+        * (true_negative + false_negative)
+    )
+    mcc = (
+        (true_positive * true_negative - false_positive * false_negative)
+        / mcc_denominator
+        if mcc_denominator
+        else 0.0
+    )
+    pr_auc = (
+        float(average_precision_score(targets, probabilities))
+        if positive_count
+        else float("nan")
+    )
     return {
         "auc": float(auc),
+        "pr_auc": pr_auc,
         "recall": recall,
         "precision": precision,
         "accuracy": accuracy,
+        "balanced_accuracy": (recall + specificity) / 2,
+        "f1": f1,
+        "mcc": float(mcc),
         "confusion_matrix": [
             [true_negative, false_positive],
             [false_negative, true_positive],
@@ -168,6 +192,10 @@ def train_model(
         raise ValueError("EPOCHS must be at least 1.")
     if cfg.BATCH_SIZE < 1:
         raise ValueError("BATCH_SIZE must be at least 1.")
+    if cfg.EARLY_STOPPING_PATIENCE < 1:
+        raise ValueError("EARLY_STOPPING_PATIENCE must be at least 1.")
+    if cfg.EARLY_STOPPING_MIN_DELTA < 0:
+        raise ValueError("EARLY_STOPPING_MIN_DELTA must be non-negative.")
 
     set_seed(cfg.SEED if seed is None else seed)
     device = torch.device(
@@ -200,6 +228,12 @@ def train_model(
         else f"  Learning rate: head={cfg.HEAD_LEARNING_RATE:g}"
     )
     print(f"  Epochs: {cfg.EPOCHS}")
+    if validation_dataset is not None:
+        print(
+            "  Early stopping: validation ROC-AUC, "
+            f"patience={cfg.EARLY_STOPPING_PATIENCE}, "
+            f"min_delta={cfg.EARLY_STOPPING_MIN_DELTA:g}"
+        )
 
     model = model or _build_model(cfg)
     if isinstance(model, nn.DataParallel):
@@ -321,6 +355,10 @@ def train_model(
 
     base_model = model.module if isinstance(model, nn.DataParallel) else model
     history = []
+    best_validation_auc = float("-inf")
+    best_epoch = None
+    best_model_state = None
+    epochs_without_improvement = 0
     checkpoint_path = Path(checkpoint_path or cfg.CHECKPOINT_PATH)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -406,12 +444,36 @@ def train_model(
                     for name in (
                         "loss",
                         "auc",
+                        "pr_auc",
                         "recall",
                         "precision",
                         "accuracy",
+                        "balanced_accuracy",
+                        "f1",
+                        "mcc",
                     )
                 }
             )
+            validation_auc = validation_metrics["auc"]
+            if not np.isfinite(validation_auc):
+                raise ValueError(
+                    "Validation ROC-AUC is undefined; the validation set must "
+                    "contain both classes."
+                )
+            if validation_auc > (
+                best_validation_auc + cfg.EARLY_STOPPING_MIN_DELTA
+            ):
+                best_validation_auc = validation_auc
+                best_epoch = epoch + 1
+                best_model_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in base_model.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            epoch_record["best_validation_auc"] = best_validation_auc
+            epoch_record["early_stopping_wait"] = epochs_without_improvement
         history.append(epoch_record)
         fold_label = (
             f"Fold {fold_number}/{n_splits} | "
@@ -431,11 +493,27 @@ def train_model(
                 else (
                     f", validation_loss: {validation_metrics['loss']:.4f}, "
                     f"validation_auc: {validation_metrics['auc']:.4f}, "
+                    f"validation_pr_auc: {validation_metrics['pr_auc']:.4f}, "
                     f"validation_recall: {validation_metrics['recall']:.4f}, "
                     f"validation_precision: {validation_metrics['precision']:.4f}, "
                     f"validation_accuracy: {validation_metrics['accuracy']:.4f}"
                 )
             )
+        )
+        if (
+            validation_loader is not None
+            and epochs_without_improvement >= cfg.EARLY_STOPPING_PATIENCE
+        ):
+            print(
+                "Early stopping: validation ROC-AUC did not improve for "
+                f"{cfg.EARLY_STOPPING_PATIENCE} consecutive epochs."
+            )
+            break
+    if best_model_state is not None:
+        base_model.load_state_dict(best_model_state)
+        print(
+            f"Restored best model from epoch {best_epoch} "
+            f"(validation ROC-AUC={best_validation_auc:.4f})."
         )
     torch.save(
         {
@@ -454,6 +532,10 @@ def train_model(
                 cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
             ),
             "epochs_trained": len(history),
+            "best_epoch": best_epoch,
+            "best_validation_auc": (
+                best_validation_auc if best_epoch is not None else None
+            ),
         },
         checkpoint_path,
     )
@@ -461,88 +543,65 @@ def train_model(
     return model, history
 
 
-def cross_validate_model(
+def train_validation_split(
     dataset,
     cfg=None,
     device=None,
-    n_splits=None,
     model_factory=None,
 ):
-    """Train and evaluate a fresh model in each stratified row-level fold."""
+    """Train once on 80% and evaluate the label-stratified 20% validation set."""
     cfg = cfg or CFG()
     if not hasattr(dataset, "labels"):
         raise TypeError("dataset must expose a labels attribute.")
-    n_splits = cfg.N_SPLITS if n_splits is None else n_splits
     labels = dataset.labels.detach().cpu().numpy().reshape(-1)
-    folds = stratified_kfold_indices(
+    train_indices, validation_indices = stratified_split_indices(
         labels,
-        n_splits=n_splits,
+        validation_size=cfg.VALIDATION_SIZE,
         random_state=cfg.SEED,
     )
-    base_checkpoint = Path(cfg.CHECKPOINT_PATH)
-    fold_metrics = []
-    for fold_number, (train_indices, evaluation_indices) in enumerate(folds, 1):
-        print(
-            f"\nFold {fold_number}/{n_splits}: "
-            f"train={len(train_indices):,} ({len(train_indices) / len(dataset):.0%}), "
-            f"evaluation={len(evaluation_indices):,} "
-            f"({len(evaluation_indices) / len(dataset):.0%})"
-        )
-        train_subset = Subset(dataset, train_indices.tolist())
-        evaluation_subset = Subset(dataset, evaluation_indices.tolist())
-        fold_checkpoint = base_checkpoint.with_name(
-            f"{base_checkpoint.stem}_fold_{fold_number}{base_checkpoint.suffix}"
-        )
-        model, _ = train_model(
-            train_dataset=train_subset,
-            cfg=cfg,
-            model=model_factory() if model_factory is not None else None,
-            device=device,
-            checkpoint_path=fold_checkpoint,
-            seed=cfg.SEED + fold_number - 1,
-            validation_dataset=evaluation_subset,
-            fold_number=fold_number,
-            n_splits=n_splits,
-        )
-        evaluation = _evaluate_dataset(
-            model=model,
-            data_loader=_make_loader(
-                evaluation_subset,
-                cfg,
-                shuffle=False,
-                device=torch.device(
-                    device or ("cuda" if torch.cuda.is_available() else "cpu")
-                ),
-            ),
-            criterion=_build_loss_function(cfg),
-            cfg=cfg,
-            device=torch.device(
-                device or ("cuda" if torch.cuda.is_available() else "cpu")
-            ),
-        )
-        precision = evaluation["precision"]
-        recall = evaluation["recall"]
-        evaluation["f1"] = (
-            2 * precision * recall / max(precision + recall, 1e-12)
-        )
-        fold_metrics.append({"fold": fold_number, **evaluation})
-
-    metric_names = ("loss", "auc", "accuracy", "precision", "recall", "f1")
-    mean_metrics = {
-        name: float(np.mean([fold[name] for fold in fold_metrics]))
-        for name in metric_names
-    }
-    std_metrics = {
-        name: float(np.std([fold[name] for fold in fold_metrics], ddof=1))
-        for name in metric_names
-    }
-    print("\nStratified k-fold results:")
-    for name in metric_names:
-        print(f"  {name}: {mean_metrics[name]:.4f} +/- {std_metrics[name]:.4f}")
+    train_subset = Subset(dataset, train_indices.tolist())
+    validation_subset = Subset(dataset, validation_indices.tolist())
+    print(
+        f"Stratified label split: train={len(train_indices):,} "
+        f"({len(train_indices) / len(dataset):.0%}), "
+        f"validation={len(validation_indices):,} "
+        f"({len(validation_indices) / len(dataset):.0%})"
+    )
+    model, history = train_model(
+        train_dataset=train_subset,
+        cfg=cfg,
+        model=model_factory() if model_factory is not None else None,
+        device=device,
+        checkpoint_path=cfg.CHECKPOINT_PATH,
+        seed=cfg.SEED,
+        validation_dataset=validation_subset,
+    )
+    evaluation_device = torch.device(
+        device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    validation_metrics = _evaluate_dataset(
+        model=model,
+        data_loader=_make_loader(
+            validation_subset,
+            cfg,
+            shuffle=False,
+            device=evaluation_device,
+        ),
+        criterion=_build_loss_function(cfg),
+        cfg=cfg,
+        device=evaluation_device,
+    )
     return {
-        "fold_metrics": fold_metrics,
-        "mean_metrics": mean_metrics,
-        "std_metrics": std_metrics,
+        "model": model,
+        "history": history,
+        "train_indices": train_indices,
+        "validation_indices": validation_indices,
+        "train_class_counts": np.bincount(labels[train_indices].astype(int), minlength=2),
+        "validation_class_counts": np.bincount(
+            labels[validation_indices].astype(int),
+            minlength=2,
+        ),
+        "validation_metrics": validation_metrics,
     }
 
 
@@ -580,67 +639,27 @@ def _evaluate_dataset(model, data_loader, criterion, cfg, device):
     }
 
 
-def evaluate_model(model, test_dataset, cfg=None, device=None):
-    """Evaluate a trained model on a dataset."""
+def evaluate_model(model, validation_dataset, cfg=None, device=None):
+    """Evaluate a trained model on the held-out validation dataset."""
     cfg = cfg or CFG()
     device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model.to(device)
-    test_loader = _make_loader(test_dataset, cfg, shuffle=False, device=device)
-    test_metrics = _evaluate_dataset(
+    validation_loader = _make_loader(
+        validation_dataset,
+        cfg,
+        shuffle=False,
+        device=device,
+    )
+    validation_metrics = _evaluate_dataset(
         model=model,
-        data_loader=test_loader,
+        data_loader=validation_loader,
         criterion=_build_loss_function(cfg),
         cfg=cfg,
         device=device,
     )
-    precision = test_metrics["precision"]
-    recall = test_metrics["recall"]
-    f1 = 2 * precision * recall / max(precision + recall, 1e-12)
-    confusion_matrix = test_metrics["confusion_matrix"]
-    print("Confusion matrix (rows=true [0, 1], columns=predicted [0, 1]):")
-    print(np.asarray(confusion_matrix))
     return {
-        "test_loss": test_metrics["loss"],
-        "auc": test_metrics["auc"],
-        "accuracy": test_metrics["accuracy"],
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "confusion_matrix": confusion_matrix,
+        f"validation_{name}": value
+        for name, value in validation_metrics.items()
     }
-
-
-def plot_cross_validation_results(results, save_path=None):
-    """Plot each fold's metrics with the cross-validation mean."""
-    fold_metrics = results.get("fold_metrics", [])
-    if not fold_metrics:
-        raise ValueError("results must contain fold metrics.")
-
-    metric_names = ("loss", "auc", "precision", "recall", "accuracy", "f1")
-    figure, axes = plt.subplots(1, len(metric_names), figsize=(17, 4))
-    for axis, name in zip(axes, metric_names):
-        values = [fold[name] for fold in fold_metrics]
-        axis.bar(range(1, len(values) + 1), values, color="steelblue")
-        axis.axhline(
-            results["mean_metrics"][name],
-            color="darkorange",
-            linestyle="--",
-            label="Mean",
-        )
-        axis.set_title(name.capitalize())
-        axis.set_xlabel("Fold")
-        axis.set_xticks(range(1, len(values) + 1))
-        axis.grid(axis="y", alpha=0.3)
-        axis.legend()
-        if name != "loss":
-            axis.set_ylim(0, 1)
-
-    figure.suptitle("Stratified k-fold cross-validation")
-    figure.tight_layout()
-    if save_path is not None:
-        output_path = Path(save_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(output_path, dpi=150, bbox_inches="tight")
-    return figure, axes

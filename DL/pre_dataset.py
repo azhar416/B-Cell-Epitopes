@@ -83,7 +83,9 @@ def preprocess_for_protein_model(
         if not sequence:
             raise ValueError(f"Empty peptide sequence at row {index}.")
 
-        invalid = set(sequence).difference(canonical_amino_acids | rare_amino_acids | {"X"})
+        invalid = set(sequence).difference(
+            canonical_amino_acids | rare_amino_acids | {"X"}
+        )
         if invalid:
             raise ValueError(
                 f"Unsupported residues at row {index}: {sorted(invalid)}"
