@@ -21,6 +21,16 @@ def load_protein_tokenizer(model_type, model_name):
     raise ValueError("model_type must be either 'protbert' or 'esm2'.")
 
 
+def resolve_max_length(tokenizer, max_peptide_length):
+    """Return residue capacity plus the selected tokenizer's special tokens."""
+    if max_peptide_length < 1:
+        raise ValueError("max_peptide_length must be a positive integer.")
+    special_tokens = tokenizer.num_special_tokens_to_add(pair=False)
+    if not isinstance(special_tokens, int) or special_tokens < 0:
+        raise ValueError("Tokenizer returned an invalid special-token count.")
+    return max_peptide_length + special_tokens
+
+
 def load_labeled_datasets(*csv_paths):
     """Load and combine labeled peptide CSV files with matching columns."""
     if not csv_paths:

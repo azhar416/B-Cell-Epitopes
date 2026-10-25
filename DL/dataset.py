@@ -5,7 +5,7 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 
-from DL.pre_dataset import preprocess_for_protein_model
+from DL.pre_dataset import preprocess_for_protein_model, resolve_max_length
 
 
 DATASET_FILENAMES = {
@@ -65,13 +65,22 @@ def prepare_dataset(
     dataset_name,
     tokenizer,
     data_dir="dataset",
-    max_length=32,
+    max_length=None,
     model_type="protbert",
     max_peptide_length=20,
 ):
-    """Tokenize the complete cleaned dataset before train/validation splitting."""
+    """Tokenize the cleaned data without truncating allowed peptide residues."""
     if model_type.lower() not in {"protbert", "esm2"}:
         raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+    required_max_length = resolve_max_length(tokenizer, max_peptide_length)
+    if max_length is None:
+        max_length = required_max_length
+    elif max_length < required_max_length:
+        raise ValueError(
+            f"max_length={max_length} is too small for peptides up to "
+            f"{max_peptide_length} residues and {required_max_length - max_peptide_length} "
+            "tokenizer special tokens."
+        )
     dataframe = prepare_dataset_frames(
         dataset_name=dataset_name,
         data_dir=data_dir,
