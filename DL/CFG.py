@@ -21,7 +21,7 @@ class CFG:
         self.MODEL_TYPE = "protbert"  # choose "protbert" or "esm2"
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t12_35M_UR50D"
-        self.MAX_LENGTH = 32
+        self.MAX_LENGTH = 20
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
         self.USE_LORA = True  # Set True to train LoRA adapters instead
