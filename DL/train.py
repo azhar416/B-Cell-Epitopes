@@ -268,6 +268,73 @@ def _save_evaluation_plots(targets, probabilities, threshold, output_dir):
     }
 
 
+def _save_training_history_plot(history, output_dir):
+    """Save per-epoch training and validation loss and classification metrics."""
+    if not history:
+        raise ValueError("Training history must contain at least one epoch.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    epochs = [record["epoch"] for record in history]
+    figure, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    axes[0].plot(
+        epochs,
+        [record["train_loss"] for record in history],
+        marker="o",
+        label="Training",
+    )
+    if "validation_loss" in history[0]:
+        axes[0].plot(
+            epochs,
+            [record["validation_loss"] for record in history],
+            marker="o",
+            label="Validation",
+        )
+    axes[0].set(
+        xlabel="Epoch",
+        ylabel="Loss",
+        title="Training and validation loss",
+    )
+    axes[0].legend()
+
+    metric_specs = (
+        ("ROC-AUC", "auc"),
+        ("PR-AUC", "pr_auc"),
+        ("Accuracy", "accuracy"),
+        ("Balanced accuracy", "balanced_accuracy"),
+        ("F1", "f1"),
+        ("MCC", "mcc"),
+    )
+    for label, metric in metric_specs:
+        train_key = f"train_{metric}"
+        validation_key = f"validation_{metric}"
+        if train_key in history[0]:
+            axes[1].plot(
+                epochs,
+                [record[train_key] for record in history],
+                marker="o",
+                label=f"Training {label}",
+            )
+        if validation_key in history[0]:
+            axes[1].plot(
+                epochs,
+                [record[validation_key] for record in history],
+                marker="o",
+                linestyle="--",
+                label=f"Validation {label}",
+            )
+    axes[1].set(
+        xlabel="Epoch",
+        ylabel="Score",
+        title="Training and validation metrics",
+    )
+    axes[1].legend(ncol=2, fontsize="small")
+    figure.tight_layout()
+    plot_path = output_dir / "training_validation_history.png"
+    figure.savefig(plot_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+    return str(plot_path)
+
+
 def train_model(
     train_dataset,
     cfg=None,
@@ -518,9 +585,13 @@ def train_model(
             "epoch": epoch + 1,
             "train_loss": epoch_loss,
             "train_auc": metrics["auc"],
+            "train_pr_auc": metrics["pr_auc"],
             "train_recall": metrics["recall"],
             "train_precision": metrics["precision"],
             "train_accuracy": metrics["accuracy"],
+            "train_balanced_accuracy": metrics["balanced_accuracy"],
+            "train_f1": metrics["f1"],
+            "train_mcc": metrics["mcc"],
         }
         validation_metrics = None
         if validation_loader is not None:
@@ -669,6 +740,10 @@ def train_validation_split(
         seed=cfg.SEED,
         validation_dataset=validation_subset,
     )
+    history_plot = _save_training_history_plot(
+        history,
+        Path(cfg.CHECKPOINT_PATH).parent,
+    )
     evaluation_device = torch.device(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -704,6 +779,7 @@ def train_validation_split(
             minlength=2,
         ),
         "validation_metrics": validation_metrics,
+        "training_history_plot": history_plot,
         "evaluation_plots": evaluation_plots,
     }
 

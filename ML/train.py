@@ -133,6 +133,50 @@ def save_evaluation_plots(
     }
 
 
+def save_train_validation_metrics_plot(
+    train_metrics: dict[str, float | int],
+    validation_metrics: dict[str, float | int],
+    output_dir: Path,
+) -> str:
+    """Save a comparison of fitted-model training and validation metrics."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metric_names = (
+        ("ROC-AUC", "roc_auc"),
+        ("PR-AUC", "pr_auc"),
+        ("Accuracy", "accuracy"),
+        ("Balanced accuracy", "balanced_accuracy"),
+        ("F1", "f1"),
+        ("MCC", "mcc"),
+    )
+    positions = np.arange(len(metric_names))
+    width = 0.36
+    train_values = [train_metrics[key] for _, key in metric_names]
+    validation_values = [validation_metrics[key] for _, key in metric_names]
+
+    figure, axis = plt.subplots(figsize=(10, 5.5))
+    axis.bar(positions - width / 2, train_values, width, label="Training")
+    axis.bar(
+        positions + width / 2,
+        validation_values,
+        width,
+        label="Validation",
+    )
+    axis.set(
+        ylabel="Score",
+        title="Training vs validation metrics",
+        xticks=positions,
+        xticklabels=[name for name, _ in metric_names],
+        ylim=(-1.05, 1.05),
+    )
+    axis.axhline(0, color="black", linewidth=0.8)
+    axis.legend()
+    figure.tight_layout()
+    plot_path = output_dir / "training_validation_metrics.png"
+    figure.savefig(plot_path, dpi=160, bbox_inches="tight")
+    plt.close(figure)
+    return str(plot_path)
+
+
 def run_training(config: CFG) -> dict[str, object]:
     """Train on a stratified 80% subset and evaluate on held-out validation data."""
     config.validate()
@@ -154,6 +198,14 @@ def run_training(config: CFG) -> dict[str, object]:
         random_forest_trees=config.RANDOM_FOREST_TREES,
     )
     model.fit(feature_frame.iloc[train_indices], labels[train_indices])
+    train_probabilities = model.predict_proba(
+        feature_frame.iloc[train_indices]
+    )[:, 1]
+    train_metrics = calculate_metrics(
+        labels[train_indices],
+        train_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+    )
     validation_probabilities = model.predict_proba(
         feature_frame.iloc[validation_indices]
     )[:, 1]
@@ -161,6 +213,11 @@ def run_training(config: CFG) -> dict[str, object]:
         labels[validation_indices],
         validation_probabilities,
         threshold=config.PREDICTION_THRESHOLD,
+    )
+    comparison_plot = save_train_validation_metrics_plot(
+        train_metrics,
+        validation_metrics,
+        config.OUTPUT_DIR,
     )
     evaluation_plots = save_evaluation_plots(
         labels[validation_indices],
@@ -172,6 +229,11 @@ def run_training(config: CFG) -> dict[str, object]:
         f"Train: {len(train_indices):,} ({len(train_indices) / len(dataframe):.0%}); "
         f"validation: {len(validation_indices):,} "
         f"({len(validation_indices) / len(dataframe):.0%})"
+    )
+    print(
+        f"Training ROC-AUC={train_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={train_metrics['pr_auc']:.4f}, "
+        f"F1={train_metrics['f1']:.4f}"
     )
     print(
         f"Validation ROC-AUC={validation_metrics['roc_auc']:.4f}, "
@@ -218,7 +280,9 @@ def run_training(config: CFG) -> dict[str, object]:
         "threshold": config.PREDICTION_THRESHOLD,
         "train_class_counts": pd.Series(labels[train_indices]).value_counts().sort_index().to_dict(),
         "validation_class_counts": pd.Series(labels[validation_indices]).value_counts().sort_index().to_dict(),
+        "training_metrics": train_metrics,
         "validation_metrics": validation_metrics,
+        "training_validation_metrics_plot": comparison_plot,
         "evaluation_plots": evaluation_plots,
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
