@@ -1,53 +1,40 @@
+"""SMOTE helpers for continuous DL feature representations."""
+
 import numpy as np
-from torch.utils.data import Subset
+from imblearn.over_sampling import SMOTE
 
 
-USE_OVERSAMPLING = False  # Set to False to disable oversampling of the training dataset
-
-
-def _labels_for_dataset(dataset):
-    if isinstance(dataset, Subset):
-        parent_labels = _labels_for_dataset(dataset.dataset)
-        return parent_labels[np.asarray(dataset.indices, dtype=np.int64)]
-    if not hasattr(dataset, "labels"):
-        raise TypeError("Training dataset must expose labels for oversampling.")
-    return dataset.labels.detach().cpu().numpy().reshape(-1)
-
-
-def oversample_training_dataset(dataset, random_state=42, enabled=None):
-    """Randomly duplicate minority-class training examples to balance classes.
-
-    This is random oversampling, not SMOTE: interpolating token IDs would not
-    produce valid protein sequences. Validation and test datasets must not be
-    passed to this function.
-    """
-    if enabled is None:
-        enabled = USE_OVERSAMPLING
+def smote_resample(
+    features,
+    labels,
+    *,
+    enabled=True,
+    random_state=42,
+    k_neighbors=5,
+):
+    """Apply SMOTE to continuous feature vectors and return X, y, added rows."""
+    feature_array = np.asarray(features)
+    label_array = np.asarray(labels).reshape(-1)
+    if feature_array.ndim != 2 or len(feature_array) != len(label_array):
+        raise ValueError("features must be 2D and match the number of labels.")
+    if k_neighbors < 1:
+        raise ValueError("k_neighbors must be positive.")
     if not enabled:
-        return dataset
+        return feature_array, label_array, 0
 
-    labels = _labels_for_dataset(dataset)
-    classes, class_counts = np.unique(labels, return_counts=True)
-    if len(classes) != 2:
+    class_counts = np.bincount(label_array.astype(int), minlength=2)
+    if class_counts.min() <= k_neighbors:
         raise ValueError(
-            "Oversampling requires a training dataset containing both classes."
+            "k_neighbors must be smaller than the minority-class count "
+            f"({class_counts.min()})."
         )
-
-    majority_count = int(class_counts.max())
-    rng = np.random.default_rng(random_state)
-    balanced_indices = []
-    for class_label, class_count in zip(classes, class_counts):
-        class_indices = np.flatnonzero(labels == class_label)
-        extra_count = majority_count - int(class_count)
-        if extra_count:
-            extra_indices = rng.choice(
-                class_indices,
-                size=extra_count,
-                replace=True,
-            )
-            class_indices = np.concatenate((class_indices, extra_indices))
-        balanced_indices.append(class_indices)
-
-    indices = np.concatenate(balanced_indices)
-    rng.shuffle(indices)
-    return Subset(dataset, indices.tolist())
+    original_size = len(label_array)
+    resampled_features, resampled_labels = SMOTE(
+        random_state=random_state,
+        k_neighbors=k_neighbors,
+    ).fit_resample(feature_array, label_array)
+    return (
+        np.asarray(resampled_features, dtype=np.float32),
+        np.asarray(resampled_labels),
+        len(resampled_labels) - original_size,
+    )

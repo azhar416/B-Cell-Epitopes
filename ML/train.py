@@ -26,6 +26,7 @@ from sklearn.metrics import (
 from ML.CFG import CFG
 from ML.dataset import load_labeled_dataset, make_stratified_split
 from ML.model import build_model
+from ML.oversampling import smote_resample
 from ML.pre_dataset import build_feature_frame
 
 
@@ -178,7 +179,7 @@ def save_train_validation_metrics_plot(
 
 
 def run_training(config: CFG) -> dict[str, object]:
-    """Train on a stratified 80% subset and evaluate on held-out validation data."""
+    """Optionally apply SMOTE before the label-stratified train/validation split."""
     config.validate()
     dataframe = load_labeled_dataset(
         dataset_name=config.DATASET_NAME,
@@ -187,6 +188,38 @@ def run_training(config: CFG) -> dict[str, object]:
     )
     feature_frame = build_feature_frame(dataframe, feature_set=config.FEATURE_SET)
     labels = dataframe["target"].to_numpy(dtype=int)
+    resampled_metadata = dataframe[
+        ["peptide_seq", "target", "parent_protein_id"]
+    ].copy()
+    original_size = len(labels)
+    feature_frame, labels, synthetic_count = smote_resample(
+        feature_frame,
+        labels,
+        enabled=config.USE_SMOTE,
+        random_state=config.RANDOM_STATE,
+        k_neighbors=config.SMOTE_K_NEIGHBORS,
+    )
+    if config.USE_SMOTE:
+        if synthetic_count:
+            synthetic_metadata = pd.DataFrame(
+                {
+                    "peptide_seq": [""] * synthetic_count,
+                    "target": labels[original_size:],
+                    "parent_protein_id": [pd.NA] * synthetic_count,
+                }
+            )
+            resampled_metadata = pd.concat(
+                [resampled_metadata, synthetic_metadata],
+                ignore_index=True,
+            )
+        print(
+            "Pre-split SMOTE enabled: "
+            f"{original_size:,} -> {len(labels):,} examples "
+            f"({synthetic_count:,} synthetic). Validation is resampled and "
+            "must not be interpreted as an unbiased generalization estimate."
+        )
+    else:
+        print("Pre-split SMOTE disabled.")
     train_indices, validation_indices = make_stratified_split(
         labels=labels,
         validation_size=config.VALIDATION_SIZE,
@@ -226,9 +259,9 @@ def run_training(config: CFG) -> dict[str, object]:
         output_dir=config.OUTPUT_DIR,
     )
     print(
-        f"Train: {len(train_indices):,} ({len(train_indices) / len(dataframe):.0%}); "
+        f"Train: {len(train_indices):,} ({len(train_indices) / len(labels):.0%}); "
         f"validation: {len(validation_indices):,} "
-        f"({len(validation_indices) / len(dataframe):.0%})"
+        f"({len(validation_indices) / len(labels):.0%})"
     )
     print(
         f"Training ROC-AUC={train_metrics['roc_auc']:.4f}, "
@@ -244,11 +277,18 @@ def run_training(config: CFG) -> dict[str, object]:
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         {
-            "peptide_seq": dataframe.iloc[validation_indices]["peptide_seq"].to_numpy(),
+            "peptide_seq": resampled_metadata.iloc[validation_indices][
+                "peptide_seq"
+            ].fillna("").to_numpy(),
             "target": labels[validation_indices],
-            "parent_protein_id": dataframe.iloc[validation_indices][
+            "parent_protein_id": resampled_metadata.iloc[validation_indices][
                 "parent_protein_id"
             ].to_numpy(),
+            "is_synthetic": (
+                resampled_metadata.iloc[validation_indices][
+                    "parent_protein_id"
+                ].isna().to_numpy()
+            ),
             "validation_probability": validation_probabilities,
             "validation_prediction": (
                 validation_probabilities >= config.PREDICTION_THRESHOLD
@@ -263,6 +303,8 @@ def run_training(config: CFG) -> dict[str, object]:
         "dataset_name": config.DATASET_NAME,
         "validation_size": config.VALIDATION_SIZE,
         "random_state": config.RANDOM_STATE,
+        "use_smote": config.USE_SMOTE,
+        "smote_k_neighbors": config.SMOTE_K_NEIGHBORS,
     }
     dump(bundle, config.OUTPUT_DIR / "peptide_classifier.joblib")
 
@@ -270,12 +312,33 @@ def run_training(config: CFG) -> dict[str, object]:
         "dataset": config.DATASET_NAME,
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
-        "split_strategy": "stratified_by_label",
+        "split_strategy": (
+            "smote_before_stratified_split"
+            if config.USE_SMOTE
+            else "stratified_by_label"
+        ),
         "train_size": len(train_indices),
         "validation_size": len(validation_indices),
-        "train_fraction": len(train_indices) / len(dataframe),
-        "validation_fraction": len(validation_indices) / len(dataframe),
+        "train_fraction": len(train_indices) / len(labels),
+        "validation_fraction": len(validation_indices) / len(labels),
+        "resampling": (
+            {
+                "method": "SMOTE",
+                "scope": "before train/validation split",
+                "k_neighbors": config.SMOTE_K_NEIGHBORS,
+                "validation_leakage_warning": True,
+            }
+            if config.USE_SMOTE
+            else {"method": "none"}
+        ),
+        "validation_metrics_interpretation": (
+            "Biased: SMOTE was applied before the train/validation split."
+            if config.USE_SMOTE
+            else "Validation rows were not oversampled."
+        ),
         "n_examples": len(dataframe),
+        "n_examples_after_resampling": len(labels),
+        "n_synthetic_examples": len(labels) - len(dataframe),
         "n_parent_proteins": int(dataframe["parent_protein_id"].nunique()),
         "threshold": config.PREDICTION_THRESHOLD,
         "train_class_counts": pd.Series(labels[train_indices]).value_counts().sort_index().to_dict(),
@@ -296,7 +359,7 @@ def run_training(config: CFG) -> dict[str, object]:
     for metric, value in validation_metrics.items():
         print(f"  {metric}: {value}")
     print(
-        "\nSaved train-only fitted model, validation predictions, and metrics to: "
+        "\nSaved fitted model bundle, validation predictions, and metrics to: "
         f"{config.OUTPUT_DIR}"
     )
     return report

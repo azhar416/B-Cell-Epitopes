@@ -19,10 +19,12 @@ class CFG:
         self.MAX_PEPTIDE_LENGTH = 20
 
         self.MODEL_TYPE = "esm2"  # choose "protbert" or "esm2"
-        self.FEATURE_FUSION = "weighted_concat"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
+        self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5
         self.MSD_DROPOUT = 0.3
+        self.USE_SMOTE = True
+        self.SMOTE_K_NEIGHBORS = 5
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t12_35M_UR50D"
         self.MAX_LENGTH = None  # Derived from peptide length and tokenizer special tokens.

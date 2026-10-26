@@ -16,6 +16,8 @@ class CFG:
     FEATURE_SET: str = "aac"
     VALIDATION_SIZE: float = 0.2
     RANDOM_STATE: int = 42
+    USE_SMOTE: bool = True
+    SMOTE_K_NEIGHBORS: int = 5
     MAX_PEPTIDE_LENGTH: int = 20
     PREDICTION_THRESHOLD: float = 0.5
     RANDOM_FOREST_TREES: int = 300
@@ -37,6 +39,8 @@ class CFG:
             raise ValueError("FEATURE_SET must be 'aac' or 'aac_dipeptide'.")
         if not 0 < self.VALIDATION_SIZE < 1:
             raise ValueError("VALIDATION_SIZE must be between 0 and 1.")
+        if self.SMOTE_K_NEIGHBORS < 1:
+            raise ValueError("SMOTE_K_NEIGHBORS must be positive.")
         if self.MAX_PEPTIDE_LENGTH < 1:
             raise ValueError("MAX_PEPTIDE_LENGTH must be positive.")
         if not 0 < self.PREDICTION_THRESHOLD < 1:

@@ -5,13 +5,16 @@ import random
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from transformers import AutoModel
 from torch import nn
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_curve,
 )
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 from tqdm.auto import tqdm
 
 from DL.CFG import CFG
@@ -21,7 +24,7 @@ from DL.dataset import (
     stratified_split_indices,
 )
 from DL.model import ESM2ForClassification, ProtBertForClassification
-import DL.oversampling as oversampling
+from DL.oversampling import smote_resample
 
 
 class BinaryFocalLoss(nn.Module):
@@ -60,6 +63,26 @@ class BinaryFocalLoss(nn.Module):
             self.gamma
         ) * binary_cross_entropy
         return loss.mean()
+
+
+class EmbeddingClassifier(nn.Module):
+    """MLP head trained on frozen protein-encoder embeddings and descriptors."""
+
+    def __init__(self, input_size):
+        super().__init__()
+        hidden_size = min(512, max(128, input_size // 2))
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size // 2, 1),
+        )
+
+    def forward(self, features):
+        return torch.sigmoid(self.layers(features)).squeeze(-1)
 
 
 def _build_loss_function(cfg):
@@ -488,18 +511,6 @@ def train_model(
         device = torch.device("cuda", primary_device)
 
     model.to(device)
-    if oversampling.USE_OVERSAMPLING:
-        original_size = len(train_dataset)
-        train_dataset = oversampling.oversample_training_dataset(
-            train_dataset,
-            random_state=cfg.SEED if seed is None else seed,
-        )
-        print(
-            "Training-only random oversampling enabled: "
-            f"{original_size} -> {len(train_dataset)} examples"
-        )
-    else:
-        print("Training-only random oversampling disabled.")
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
     validation_loader = (
         _make_loader(validation_dataset, cfg, shuffle=False, device=device)
@@ -779,6 +790,316 @@ def train_model(
     return model, history
 
 
+def _train_embedding_smote_split(dataset, cfg, device):
+    """SMOTE frozen sequence embeddings before splitting, then train an MLP head."""
+    if cfg.EPOCHS < 1:
+        raise ValueError("EPOCHS must be at least 1.")
+    if cfg.BATCH_SIZE < 1:
+        raise ValueError("BATCH_SIZE must be at least 1.")
+    if dataset.descriptor_features is None:
+        raise ValueError("Embedding-SMOTE mode requires descriptor features.")
+    if cfg.USE_LORA:
+        print("Embedding-SMOTE mode uses a frozen pretrained encoder; LoRA is ignored.")
+    device = torch.device(
+        device or ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    labels = dataset.labels.detach().cpu().numpy().astype(np.int64)
+    class_counts = np.bincount(labels, minlength=2)
+    if class_counts.min() <= cfg.SMOTE_K_NEIGHBORS:
+        raise ValueError(
+            "SMOTE_K_NEIGHBORS must be smaller than the minority-class "
+            f"count ({class_counts.min()})."
+        )
+
+    encoder = AutoModel.from_pretrained(cfg.MODEL_NAME).to(device)
+    encoder.eval()
+    for parameter in encoder.parameters():
+        parameter.requires_grad = False
+
+    sequence_loader = DataLoader(
+        dataset,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+    )
+    embedding_batches = []
+    with torch.inference_mode():
+        for batch in tqdm(sequence_loader, desc="Embedding peptides"):
+            model_inputs = {
+                key: value.to(device, non_blocking=True)
+                for key, value in batch.items()
+                if key in {"input_ids", "attention_mask", "token_type_ids"}
+            }
+            if (
+                "token_type_ids" in model_inputs
+                and encoder.config.model_type != "bert"
+            ):
+                model_inputs.pop("token_type_ids")
+            outputs = encoder(**model_inputs)
+            embedding_batches.append(
+                outputs.last_hidden_state[:, 0, :].cpu().numpy()
+            )
+    sequence_embeddings = np.concatenate(embedding_batches).astype(np.float32)
+    del encoder, sequence_loader
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    raw_descriptors = dataset.descriptor_features.detach().cpu().numpy()
+    descriptor_imputer = SimpleImputer(
+        strategy="median",
+        keep_empty_features=True,
+    )
+    imputed_descriptors = descriptor_imputer.fit_transform(raw_descriptors)
+    all_features = np.concatenate(
+        [sequence_embeddings, imputed_descriptors],
+        axis=1,
+    )
+    feature_scaler = StandardScaler()
+    scaled_features = feature_scaler.fit_transform(all_features).astype(
+        np.float32
+    )
+    original_size = len(labels)
+    resampled_features, resampled_labels, synthetic_count = smote_resample(
+        scaled_features,
+        labels,
+        enabled=cfg.USE_SMOTE,
+        random_state=cfg.SEED,
+        k_neighbors=cfg.SMOTE_K_NEIGHBORS,
+    )
+    resampled_features = torch.tensor(
+        resampled_features,
+        dtype=torch.float32,
+    )
+    resampled_labels = torch.tensor(
+        resampled_labels,
+        dtype=torch.float32,
+    )
+    train_indices, validation_indices = stratified_split_indices(
+        resampled_labels.numpy(),
+        validation_size=cfg.VALIDATION_SIZE,
+        random_state=cfg.SEED,
+    )
+    print(
+        "Pre-split embedding SMOTE enabled: "
+        f"{original_size:,} -> {len(resampled_labels):,} examples "
+        f"({synthetic_count:,} synthetic). "
+        "Validation is resampled and must not be interpreted as an unbiased "
+        "generalization estimate."
+    )
+    validation_contains_synthetic = bool(
+        np.any(validation_indices >= original_size)
+    )
+    print(
+        "Embedding-SMOTE mode trains an MLP on frozen encoder embeddings plus "
+        "scaled descriptors; sequence fine-tuning and configured feature-fusion "
+        "layers are not used."
+    )
+
+    train_dataset = TensorDataset(
+        resampled_features[torch.as_tensor(train_indices, dtype=torch.long)],
+        resampled_labels[torch.as_tensor(train_indices, dtype=torch.long)],
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=True,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+    )
+    validation_dataset = TensorDataset(
+        resampled_features[
+            torch.as_tensor(validation_indices, dtype=torch.long)
+        ],
+        resampled_labels[
+            torch.as_tensor(validation_indices, dtype=torch.long)
+        ],
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+    )
+    model = EmbeddingClassifier(resampled_features.shape[1]).to(device)
+    criterion = _build_loss_function(cfg)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=cfg.HEAD_LEARNING_RATE,
+        weight_decay=cfg.WEIGHT_DECAY,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max",
+        factor=cfg.SCHEDULER_FACTOR,
+        patience=cfg.SCHEDULER_PATIENCE,
+        min_lr=cfg.SCHEDULER_MIN_LR,
+    )
+
+    def evaluate(data_loader):
+        model.eval()
+        losses = []
+        targets = []
+        probabilities = []
+        with torch.inference_mode():
+            for batch_features, batch_labels in data_loader:
+                batch_features = batch_features.to(device, non_blocking=True)
+                batch_labels = batch_labels.to(device, non_blocking=True)
+                batch_probabilities = model(batch_features)
+                losses.append(
+                    criterion(batch_probabilities, batch_labels).item()
+                    * batch_labels.size(0)
+                )
+                targets.append(batch_labels.cpu().numpy())
+                probabilities.append(batch_probabilities.cpu().numpy())
+        all_targets = np.concatenate(targets)
+        all_probabilities = np.concatenate(probabilities)
+        return {
+            "loss": float(sum(losses) / len(all_targets)),
+            **_binary_metrics(
+                [all_targets],
+                [all_probabilities],
+                cfg.PREDICTION_THRESHOLD,
+            ),
+        }, all_targets, all_probabilities
+
+    history = []
+    best_validation_auc = float("-inf")
+    best_epoch = None
+    best_model_state = None
+    epochs_without_improvement = 0
+    for epoch in range(cfg.EPOCHS):
+        model.train()
+        for batch_features, batch_labels in tqdm(
+            train_loader,
+            desc=f"Embedding MLP epoch {epoch + 1}/{cfg.EPOCHS}",
+            leave=False,
+        ):
+            batch_features = batch_features.to(device, non_blocking=True)
+            batch_labels = batch_labels.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            probabilities = model(batch_features)
+            loss = criterion(probabilities, batch_labels)
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                model.parameters(),
+                cfg.GRADIENT_CLIP_NORM,
+            )
+            optimizer.step()
+
+        train_metrics, _, _ = evaluate(train_loader)
+        validation_metrics, _, _ = evaluate(validation_loader)
+        validation_auc = validation_metrics["auc"]
+        if not np.isfinite(validation_auc):
+            raise ValueError("Validation ROC-AUC is undefined.")
+        scheduler.step(validation_auc)
+        record = {
+            "epoch": epoch + 1,
+            "train_loss": train_metrics["loss"],
+            "train_auc": train_metrics["auc"],
+            "train_pr_auc": train_metrics["pr_auc"],
+            "train_recall": train_metrics["recall"],
+            "train_precision": train_metrics["precision"],
+            "train_accuracy": train_metrics["accuracy"],
+            "train_balanced_accuracy": train_metrics["balanced_accuracy"],
+            "train_f1": train_metrics["f1"],
+            "train_mcc": train_metrics["mcc"],
+            **{
+                f"validation_{key}": value
+                for key, value in validation_metrics.items()
+            },
+            "learning_rates": [
+                float(group["lr"]) for group in optimizer.param_groups
+            ],
+        }
+        history.append(record)
+        print(
+            f"Embedding MLP epoch {epoch + 1}/{cfg.EPOCHS} - "
+            f"train_loss: {train_metrics['loss']:.4f}, "
+            f"train_auc: {train_metrics['auc']:.4f}, "
+            f"validation_loss: {validation_metrics['loss']:.4f}, "
+            f"validation_auc: {validation_auc:.4f}"
+        )
+        if validation_auc > (
+            best_validation_auc + cfg.EARLY_STOPPING_MIN_DELTA
+        ):
+            best_validation_auc = validation_auc
+            best_epoch = epoch + 1
+            best_model_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        if epochs_without_improvement >= cfg.EARLY_STOPPING_PATIENCE:
+            print(
+                "Early stopping: validation ROC-AUC did not improve for "
+                f"{cfg.EARLY_STOPPING_PATIENCE} consecutive epochs."
+            )
+            break
+
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    validation_metrics, validation_targets, validation_probabilities = evaluate(
+        validation_loader
+    )
+    output_dir = Path(cfg.CHECKPOINT_PATH).parent
+    history_plot = _save_training_history_plot(history, output_dir)
+    evaluation_plots = _save_evaluation_plots(
+        validation_targets,
+        validation_probabilities,
+        cfg.PREDICTION_THRESHOLD,
+        output_dir,
+    )
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "model_type": "embedding_mlp",
+            "encoder_name": cfg.MODEL_NAME,
+            "input_size": int(resampled_features.shape[1]),
+            "descriptor_columns": list(DESCRIPTOR_COLUMNS),
+            "use_smote": True,
+            "smote_k_neighbors": cfg.SMOTE_K_NEIGHBORS,
+            "feature_scaler_mean": feature_scaler.mean_,
+            "feature_scaler_scale": feature_scaler.scale_,
+            "descriptor_imputer_statistics": descriptor_imputer.statistics_,
+            "best_epoch": best_epoch,
+            "best_validation_auc": best_validation_auc,
+            "history": history,
+        },
+        cfg.CHECKPOINT_PATH,
+    )
+    print(f"Saved embedding-SMOTE checkpoint to {cfg.CHECKPOINT_PATH}")
+    return {
+        "model": model,
+        "history": history,
+        "train_indices": train_indices,
+        "validation_indices": validation_indices,
+        "train_class_counts": np.bincount(
+            resampled_labels.numpy()[train_indices].astype(int),
+            minlength=2,
+        ),
+        "validation_class_counts": np.bincount(
+            resampled_labels.numpy()[validation_indices].astype(int),
+            minlength=2,
+        ),
+        "validation_metrics": validation_metrics,
+        "training_history_plot": history_plot,
+        "evaluation_plots": evaluation_plots,
+        "feature_fusion": "embedding_concatenation",
+        "training_mode": "pre_split_smote_embedding_mlp",
+        "n_original_examples": original_size,
+        "n_examples_after_smote": len(resampled_labels),
+        "validation_contains_synthetic_examples": validation_contains_synthetic,
+        "validation_metrics_interpretation": (
+            "Biased: SMOTE was applied before the train/validation split."
+        ),
+        "best_epoch": best_epoch,
+    }
+
+
 def train_validation_split(
     dataset,
     cfg=None,
@@ -789,6 +1110,17 @@ def train_validation_split(
     cfg = cfg or CFG()
     if not hasattr(dataset, "labels"):
         raise TypeError("dataset must expose a labels attribute.")
+    if cfg.USE_SMOTE:
+        if model_factory is not None:
+            raise ValueError(
+                "model_factory is not supported in embedding-SMOTE mode."
+            )
+        set_seed(cfg.SEED)
+        return _train_embedding_smote_split(
+            dataset=dataset,
+            cfg=cfg,
+            device=device,
+        )
     labels = dataset.labels.detach().cpu().numpy().reshape(-1)
     train_indices, validation_indices = stratified_split_indices(
         labels,
