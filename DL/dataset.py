@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
@@ -14,6 +16,16 @@ DATASET_FILENAMES = {
 }
 CANONICAL_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 RARE_AMINO_ACIDS = frozenset("BUZO")
+DESCRIPTOR_COLUMNS = (
+    "chou_fasman",
+    "emini",
+    "kolaskar_tongaonkar",
+    "parker",
+    "isoelectric_point",
+    "aromaticity",
+    "hydrophobicity",
+    "stability",
+)
 
 
 def _normalize_sequence(value, row_label):
@@ -39,6 +51,7 @@ class PeptideDataset(Dataset):
         self,
         encodings,
         group_ids=None,
+        descriptor_features=None,
     ):
         self.encodings = {
             key: torch.tensor(values, dtype=torch.long)
@@ -46,17 +59,31 @@ class PeptideDataset(Dataset):
             if key != "labels"
         }
         self.labels = torch.tensor(encodings["labels"], dtype=torch.float32)
+        self.descriptor_features = (
+            torch.tensor(descriptor_features, dtype=torch.float32)
+            if descriptor_features is not None
+            else None
+        )
         self.group_ids = (
             np.asarray(group_ids) if group_ids is not None else None
         )
         if self.group_ids is not None and len(self.group_ids) != len(self.labels):
             raise ValueError("group_ids must contain one parent ID per example.")
+        if (
+            self.descriptor_features is not None
+            and len(self.descriptor_features) != len(self.labels)
+        ):
+            raise ValueError(
+                "descriptor_features must contain one row per example."
+            )
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, index):
         item = {key: values[index] for key, values in self.encodings.items()}
+        if self.descriptor_features is not None:
+            item["features"] = self.descriptor_features[index]
         item["labels"] = self.labels[index]
         return item
 
@@ -96,6 +123,9 @@ def prepare_dataset(
     return PeptideDataset(
         encodings,
         group_ids=dataframe["parent_protein_id"].to_numpy(),
+        descriptor_features=dataframe[list(DESCRIPTOR_COLUMNS)].to_numpy(
+            dtype=np.float32
+        ),
     )
 
 
@@ -104,7 +134,7 @@ def prepare_dataset_frames(
     data_dir="dataset",
     max_peptide_length=20,
 ):
-    """Load and clean labeled DL examples, retaining parent IDs for CV."""
+    """Load and clean labeled examples with descriptors and protein metadata."""
     dataset_name = dataset_name.lower()
     if dataset_name not in DATASET_FILENAMES:
         raise ValueError(
@@ -117,7 +147,12 @@ def prepare_dataset_frames(
     if not csv_path.is_file():
         raise FileNotFoundError(f"Dataset file not found: {csv_path}")
     dataframe = pd.read_csv(csv_path)
-    required_columns = {"peptide_seq", "target", "parent_protein_id"}
+    required_columns = {
+        "peptide_seq",
+        "target",
+        "parent_protein_id",
+        *DESCRIPTOR_COLUMNS,
+    }
     missing = required_columns.difference(dataframe.columns)
     if missing:
         raise ValueError(f"{csv_path.name} is missing columns: {sorted(missing)}")
@@ -136,6 +171,8 @@ def prepare_dataset_frames(
     if labels.isna().any() or not labels.isin((0, 1)).all():
         raise ValueError("'target' must contain only binary labels 0 and 1.")
     dataframe["target"] = labels.astype("int64")
+    for column in DESCRIPTOR_COLUMNS:
+        dataframe[column] = pd.to_numeric(dataframe[column], errors="coerce")
 
     input_rows = len(dataframe)
     overlength = dataframe["peptide_seq"].str.len().gt(max_peptide_length)
@@ -166,6 +203,28 @@ def prepare_dataset_frames(
         f"parent proteins: {dataframe['parent_protein_id'].nunique():,}."
     )
     return dataframe
+
+
+def scale_descriptor_features(dataset, train_indices):
+    """Fit imputation and scaling on training rows and transform all rows."""
+    if dataset.descriptor_features is None:
+        raise ValueError("Dataset does not contain descriptor features.")
+    raw_features = dataset.descriptor_features.detach().cpu().numpy()
+    train_features = raw_features[np.asarray(train_indices, dtype=np.int64)]
+    if train_features.size == 0:
+        raise ValueError("Training indices must select at least one example.")
+
+    imputer = SimpleImputer(strategy="median", keep_empty_features=True)
+    train_imputed = imputer.fit_transform(train_features)
+    scaler = StandardScaler()
+    scaler.fit(train_imputed)
+    all_imputed = imputer.transform(raw_features)
+    scaled_features = scaler.transform(all_imputed).astype(np.float32)
+    dataset.descriptor_features = torch.tensor(
+        scaled_features,
+        dtype=torch.float32,
+    )
+    return imputer, scaler
 
 
 def stratified_split_indices(

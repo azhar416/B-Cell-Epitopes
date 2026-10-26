@@ -1,6 +1,6 @@
 from pathlib import Path
+from copy import copy
 import random
-from copy import deepcopy
 
 import numpy as np
 import torch
@@ -15,7 +15,11 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 from DL.CFG import CFG
-from DL.dataset import stratified_split_indices
+from DL.dataset import (
+    DESCRIPTOR_COLUMNS,
+    scale_descriptor_features,
+    stratified_split_indices,
+)
 from DL.model import ESM2ForClassification, ProtBertForClassification
 import DL.oversampling as oversampling
 
@@ -106,6 +110,8 @@ def _build_model(cfg):
         lora_alpha=cfg.LORA_ALPHA,
         lora_dropout=cfg.LORA_DROPOUT,
         lora_target_modules=cfg.LORA_TARGET_MODULES,
+        feature_fusion=cfg.FEATURE_FUSION,
+        num_features=len(DESCRIPTOR_COLUMNS),
     )
 
 
@@ -343,6 +349,7 @@ def train_model(
     checkpoint_path=None,
     seed=None,
     validation_dataset=None,
+    feature_preprocessing=None,
     fold_number=None,
     n_splits=None,
 ):
@@ -473,8 +480,8 @@ def train_model(
     ]
     classifier_parameters = [
         parameter
-        for parameter in model.classifier.parameters()
-        if parameter.requires_grad
+        for name, parameter in model.named_parameters()
+        if not name.startswith("bert.") and parameter.requires_grad
     ]
     optimizer_parameters = []
     if encoder_parameters:
@@ -686,6 +693,9 @@ def train_model(
             "history": history,
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
+            "feature_fusion": cfg.FEATURE_FUSION,
+            "descriptor_columns": list(DESCRIPTOR_COLUMNS),
+            "feature_preprocessing": feature_preprocessing,
             "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,
             "use_lora": cfg.USE_LORA,
@@ -723,8 +733,10 @@ def train_validation_split(
         validation_size=cfg.VALIDATION_SIZE,
         random_state=cfg.SEED,
     )
-    train_subset = Subset(dataset, train_indices.tolist())
-    validation_subset = Subset(dataset, validation_indices.tolist())
+    model_dataset = copy(dataset)
+    imputer, scaler = scale_descriptor_features(model_dataset, train_indices)
+    train_subset = Subset(model_dataset, train_indices.tolist())
+    validation_subset = Subset(model_dataset, validation_indices.tolist())
     print(
         f"Stratified label split: train={len(train_indices):,} "
         f"({len(train_indices) / len(dataset):.0%}), "
@@ -739,6 +751,11 @@ def train_validation_split(
         checkpoint_path=cfg.CHECKPOINT_PATH,
         seed=cfg.SEED,
         validation_dataset=validation_subset,
+        feature_preprocessing={
+            "imputer_statistics": imputer.statistics_,
+            "scaler_mean": scaler.mean_,
+            "scaler_scale": scaler.scale_,
+        },
     )
     history_plot = _save_training_history_plot(
         history,
@@ -781,7 +798,49 @@ def train_validation_split(
         "validation_metrics": validation_metrics,
         "training_history_plot": history_plot,
         "evaluation_plots": evaluation_plots,
+        "feature_fusion": cfg.FEATURE_FUSION,
+        "descriptor_columns": list(DESCRIPTOR_COLUMNS),
     }
+
+
+def train_feature_fusion_comparison(dataset, cfg=None, device=None):
+    """Train sequence-only and both fusion variants on an identical split."""
+    cfg = cfg or CFG()
+    fusion_types = ("sequence_only", "weighted_concat", "cross_attention")
+    original_fusion = cfg.FEATURE_FUSION
+    original_checkpoint = Path(cfg.CHECKPOINT_PATH)
+    results = {}
+    reference_train_indices = None
+    try:
+        for fusion_type in fusion_types:
+            cfg.FEATURE_FUSION = fusion_type
+            cfg.CHECKPOINT_PATH = str(
+                original_checkpoint.parent / fusion_type / original_checkpoint.name
+            )
+            print(f"\n=== Feature fusion: {fusion_type} ===")
+            result = train_validation_split(
+                dataset=dataset,
+                cfg=cfg,
+                device=device,
+            )
+            result.pop("model")
+            if reference_train_indices is None:
+                reference_train_indices = result["train_indices"]
+            elif not np.array_equal(
+                reference_train_indices,
+                result["train_indices"],
+            ):
+                raise RuntimeError(
+                    "Feature-fusion variants must use identical train/validation splits."
+                )
+            result["checkpoint_path"] = cfg.CHECKPOINT_PATH
+            results[fusion_type] = result
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    finally:
+        cfg.FEATURE_FUSION = original_fusion
+        cfg.CHECKPOINT_PATH = str(original_checkpoint)
+    return results
 
 
 def _evaluate_dataset(

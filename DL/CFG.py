@@ -18,7 +18,8 @@ class CFG:
         self._SARS2_DATASET_PATH = self.DATA_DIR / "input_covid.csv"
         self.MAX_PEPTIDE_LENGTH = 20
 
-        self.MODEL_TYPE = "protbert"  # choose "protbert" or "esm2"
+        self.MODEL_TYPE = "esm2"  # choose "protbert" or "esm2"
+        self.FEATURE_FUSION = "weighted_concat" # choose "sequence_only", "weighted_concat", or "cross_attention"
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t12_35M_UR50D"
         self.MAX_LENGTH = None  # Derived from peptide length and tokenizer special tokens.
