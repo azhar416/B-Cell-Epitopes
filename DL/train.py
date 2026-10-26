@@ -363,6 +363,12 @@ def train_model(
         raise ValueError("EARLY_STOPPING_PATIENCE must be at least 1.")
     if cfg.EARLY_STOPPING_MIN_DELTA < 0:
         raise ValueError("EARLY_STOPPING_MIN_DELTA must be non-negative.")
+    if cfg.SCHEDULER_PATIENCE < 0:
+        raise ValueError("SCHEDULER_PATIENCE must be non-negative.")
+    if not 0 < cfg.SCHEDULER_FACTOR < 1:
+        raise ValueError("SCHEDULER_FACTOR must be between 0 and 1.")
+    if cfg.SCHEDULER_MIN_LR < 0:
+        raise ValueError("SCHEDULER_MIN_LR must be non-negative.")
 
     set_seed(cfg.SEED if seed is None else seed)
     device = torch.device(
@@ -509,6 +515,23 @@ def train_model(
         optimizer_parameters,
         weight_decay=cfg.WEIGHT_DECAY,
     )
+    scheduler_monitor = (
+        "validation ROC-AUC"
+        if validation_loader is not None
+        else "training loss"
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="max" if validation_loader is not None else "min",
+        factor=cfg.SCHEDULER_FACTOR,
+        patience=cfg.SCHEDULER_PATIENCE,
+        min_lr=cfg.SCHEDULER_MIN_LR,
+    )
+    print(
+        "  Learning-rate scheduler: ReduceLROnPlateau "
+        f"(monitor={scheduler_monitor}, factor={cfg.SCHEDULER_FACTOR}, "
+        f"patience={cfg.SCHEDULER_PATIENCE})"
+    )
 
     if device_ids:
         model = nn.DataParallel(
@@ -645,6 +668,12 @@ def train_model(
                 epochs_without_improvement += 1
             epoch_record["best_validation_auc"] = best_validation_auc
             epoch_record["early_stopping_wait"] = epochs_without_improvement
+            scheduler.step(validation_auc)
+        else:
+            scheduler.step(epoch_loss)
+        epoch_record["learning_rates"] = [
+            float(group["lr"]) for group in optimizer.param_groups
+        ]
         history.append(epoch_record)
         fold_label = (
             f"Fold {fold_number}/{n_splits} | "
@@ -690,6 +719,7 @@ def train_model(
         {
             "model_state_dict": base_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "history": history,
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
@@ -801,46 +831,6 @@ def train_validation_split(
         "feature_fusion": cfg.FEATURE_FUSION,
         "descriptor_columns": list(DESCRIPTOR_COLUMNS),
     }
-
-
-def train_feature_fusion_comparison(dataset, cfg=None, device=None):
-    """Train sequence-only and both fusion variants on an identical split."""
-    cfg = cfg or CFG()
-    fusion_types = ("sequence_only", "weighted_concat", "cross_attention")
-    original_fusion = cfg.FEATURE_FUSION
-    original_checkpoint = Path(cfg.CHECKPOINT_PATH)
-    results = {}
-    reference_train_indices = None
-    try:
-        for fusion_type in fusion_types:
-            cfg.FEATURE_FUSION = fusion_type
-            cfg.CHECKPOINT_PATH = str(
-                original_checkpoint.parent / fusion_type / original_checkpoint.name
-            )
-            print(f"\n=== Feature fusion: {fusion_type} ===")
-            result = train_validation_split(
-                dataset=dataset,
-                cfg=cfg,
-                device=device,
-            )
-            result.pop("model")
-            if reference_train_indices is None:
-                reference_train_indices = result["train_indices"]
-            elif not np.array_equal(
-                reference_train_indices,
-                result["train_indices"],
-            ):
-                raise RuntimeError(
-                    "Feature-fusion variants must use identical train/validation splits."
-                )
-            result["checkpoint_path"] = cfg.CHECKPOINT_PATH
-            results[fusion_type] = result
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    finally:
-        cfg.FEATURE_FUSION = original_fusion
-        cfg.CHECKPOINT_PATH = str(original_checkpoint)
-    return results
 
 
 def _evaluate_dataset(

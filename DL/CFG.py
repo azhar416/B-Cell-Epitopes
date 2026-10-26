@@ -19,7 +19,7 @@ class CFG:
         self.MAX_PEPTIDE_LENGTH = 20
 
         self.MODEL_TYPE = "esm2"  # choose "protbert" or "esm2"
-        self.FEATURE_FUSION = "weighted_concat" # choose "sequence_only", "weighted_concat", or "cross_attention"
+        self.FEATURE_FUSION = "cross_attention" # choose "sequence_only", "weighted_concat", or "cross_attention"
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t12_35M_UR50D"
         self.MAX_LENGTH = None  # Derived from peptide length and tokenizer special tokens.
@@ -36,6 +36,9 @@ class CFG:
         self.EPOCHS = 3 if self.DEBUG else 100
         self.EARLY_STOPPING_PATIENCE = 10
         self.EARLY_STOPPING_MIN_DELTA = 0.001
+        self.SCHEDULER_PATIENCE = 3
+        self.SCHEDULER_FACTOR = 0.5
+        self.SCHEDULER_MIN_LR = 1e-7
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
         self.LORA_LEARNING_RATE = 1e-4
         self.HEAD_LEARNING_RATE = 1e-4
