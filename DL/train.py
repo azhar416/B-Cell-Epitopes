@@ -112,6 +112,8 @@ def _build_model(cfg):
         lora_target_modules=cfg.LORA_TARGET_MODULES,
         feature_fusion=cfg.FEATURE_FUSION,
         num_features=len(DESCRIPTOR_COLUMNS),
+        msd_samples=cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
+        msd_dropout=cfg.MSD_DROPOUT,
     )
 
 
@@ -369,6 +371,26 @@ def train_model(
         raise ValueError("SCHEDULER_FACTOR must be between 0 and 1.")
     if cfg.SCHEDULER_MIN_LR < 0:
         raise ValueError("SCHEDULER_MIN_LR must be non-negative.")
+    if not isinstance(cfg.FEATURE_FUSION, str):
+        raise ValueError("FEATURE_FUSION must be a string.")
+    cfg.FEATURE_FUSION = cfg.FEATURE_FUSION.lower()
+    if cfg.FEATURE_FUSION not in {
+        "sequence_only",
+        "weighted_concat",
+        "cross_attention",
+        "se",
+        "gmu",
+    }:
+        raise ValueError(
+            "FEATURE_FUSION must be sequence_only, weighted_concat, "
+            "cross_attention, se, or gmu."
+        )
+    if not isinstance(cfg.MSD_SAMPLES, int) or cfg.MSD_SAMPLES < 1:
+        raise ValueError("MSD_SAMPLES must be a positive integer.")
+    if cfg.MSD_ENABLED and cfg.MSD_SAMPLES < 2:
+        raise ValueError("MSD_SAMPLES must be at least 2 when MSD is enabled.")
+    if not 0 <= cfg.MSD_DROPOUT < 1:
+        raise ValueError("MSD_DROPOUT must be in the range [0, 1).")
 
     set_seed(cfg.SEED if seed is None else seed)
     device = torch.device(
@@ -381,6 +403,13 @@ def train_model(
     print(f"  Dataset: {cfg.DATASET_NAME}")
     print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
+    msd_status = (
+        f"enabled ({cfg.MSD_SAMPLES} samples)"
+        if cfg.MSD_ENABLED
+        else "disabled"
+    )
+    print(f"  Feature fusion: {cfg.FEATURE_FUSION}")
+    print(f"  Multi-sample dropout: {msd_status}")
     if cfg.LOSS_FUNCTION.lower() == "binary_focal":
         print(
             f"    Focal alpha={cfg.FOCAL_ALPHA}, gamma={cfg.FOCAL_GAMMA}"
@@ -724,6 +753,9 @@ def train_model(
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
             "feature_fusion": cfg.FEATURE_FUSION,
+            "msd_enabled": cfg.MSD_ENABLED,
+            "msd_samples": cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
+            "msd_dropout": cfg.MSD_DROPOUT,
             "descriptor_columns": list(DESCRIPTOR_COLUMNS),
             "feature_preprocessing": feature_preprocessing,
             "loss_function": cfg.LOSS_FUNCTION,

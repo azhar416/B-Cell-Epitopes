@@ -18,8 +18,14 @@ class ProteinTransformerForClassification(nn.Module):
         feature_fusion="sequence_only",
         num_features=8,
         cross_attention_heads=8,
+        msd_samples=1,
+        msd_dropout=0.3,
     ):
         super().__init__()
+        if msd_samples < 1:
+            raise ValueError("msd_samples must be at least 1.")
+        if not 0 <= msd_dropout < 1:
+            raise ValueError("msd_dropout must be in the range [0, 1).")
         self.bert = AutoModel.from_pretrained(
             model_name,
             config=model_config,
@@ -50,12 +56,16 @@ class ProteinTransformerForClassification(nn.Module):
             "sequence_only",
             "weighted_concat",
             "cross_attention",
+            "se",
+            "gmu",
         }:
             raise ValueError(
                 "feature_fusion must be 'sequence_only', 'weighted_concat', "
-                "or 'cross_attention'."
+                "'cross_attention', 'se', or 'gmu'."
             )
         self.num_features = num_features
+        self.msd_samples = msd_samples
+        self.msd_dropout = nn.Dropout(p=msd_dropout)
         classifier_input_size = hidden_size
         if self.feature_fusion == "weighted_concat":
             self.feature_encoder = nn.Sequential(
@@ -82,14 +92,24 @@ class ProteinTransformerForClassification(nn.Module):
                 batch_first=True,
             )
             classifier_input_size = hidden_size * 2
-        self.classifier = nn.Sequential(
+        elif self.feature_fusion == "se":
+            self.se_feature_encoder = nn.Sequential(
+                nn.Linear(num_features, hidden_size),
+                nn.GELU(),
+                nn.Linear(hidden_size, hidden_size),
+                nn.Sigmoid(),
+            )
+        elif self.feature_fusion == "gmu":
+            self.gmu_sequence_projection = nn.Linear(hidden_size, hidden_size)
+            self.gmu_feature_projection = nn.Linear(num_features, hidden_size)
+            self.gmu_gate = nn.Linear(hidden_size * 2, hidden_size)
+
+        self.classifier_hidden = nn.Sequential(
             nn.Dropout(p=0.5),
             nn.Linear(classifier_input_size, hidden_size // 2),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(hidden_size // 2, 1),
-            nn.Sigmoid(),
         )
+        self.classifier_output = nn.Linear(hidden_size // 2, 1)
 
     def forward(
         self,
@@ -160,7 +180,44 @@ class ProteinTransformerForClassification(nn.Module):
                     (cls_embedding, pooled_attended_features),
                     dim=-1,
                 )
-        return self.classifier(fused).squeeze(-1)
+            elif self.feature_fusion == "se":
+                feature_gate = self.se_feature_encoder(features)
+                fused = cls_embedding * feature_gate
+            elif self.feature_fusion == "gmu":
+                sequence_projection = torch.tanh(
+                    self.gmu_sequence_projection(cls_embedding)
+                )
+                feature_projection = torch.tanh(
+                    self.gmu_feature_projection(features)
+                )
+                gate = torch.sigmoid(
+                    self.gmu_gate(
+                        torch.cat(
+                            (sequence_projection, feature_projection),
+                            dim=-1,
+                        )
+                    )
+                )
+                fused = (
+                    gate * sequence_projection
+                    + (1 - gate) * feature_projection
+                )
+
+        hidden = self.classifier_hidden(fused)
+        if self.training and self.msd_samples > 1:
+            logits = torch.stack(
+                [
+                    self.classifier_output(self.msd_dropout(hidden))
+                    for _ in range(self.msd_samples)
+                ],
+                dim=0,
+            ).mean(dim=0)
+        else:
+            classifier_input = (
+                self.msd_dropout(hidden) if self.training else hidden
+            )
+            logits = self.classifier_output(classifier_input)
+        return torch.sigmoid(logits).squeeze(-1)
 
 
 class ProtBertForClassification(ProteinTransformerForClassification):
