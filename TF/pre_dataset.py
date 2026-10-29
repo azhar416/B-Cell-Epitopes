@@ -31,6 +31,36 @@ def resolve_max_length(tokenizer, max_peptide_length):
     return max_peptide_length + special_tokens
 
 
+def extract_flanked_sequence(
+    peptide_seq: str,
+    protein_seq: str,
+    start_position: int,
+    end_position: int,
+    flanking_size: int = 5,
+    row_label: object = "unknown",
+) -> str:
+    """Extract peptide with surrounding N- and C-terminal flanking amino acids from the protein."""
+    if flanking_size < 0:
+        raise ValueError("flanking_size must be a non-negative integer.")
+    if flanking_size == 0:
+        return peptide_seq
+
+    protein_len = len(protein_seq)
+    start_idx = int(start_position) - 1
+    end_idx = int(end_position)
+
+    if start_idx < 0 or end_idx < start_idx or end_idx > protein_len:
+        raise ValueError(
+            f"Invalid peptide coordinates [{start_position}, {end_position}] "
+            f"for protein of length {protein_len} at row {row_label}."
+        )
+
+    left_start = max(0, start_idx - flanking_size)
+    flank_left = protein_seq[left_start:start_idx]
+    flank_right = protein_seq[end_idx : min(protein_len, end_idx + flanking_size)]
+    return f"{flank_left}{peptide_seq}{flank_right}"
+
+
 def load_labeled_datasets(*csv_paths):
     """Load and combine labeled peptide CSV files with matching columns."""
     if not csv_paths:

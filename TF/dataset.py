@@ -7,7 +7,11 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 
-from TF.pre_dataset import preprocess_for_protein_model, resolve_max_length
+from TF.pre_dataset import (
+    extract_flanked_sequence,
+    preprocess_for_protein_model,
+    resolve_max_length,
+)
 
 
 DATASET_FILENAMES = {
@@ -95,30 +99,58 @@ def prepare_dataset(
     max_length=None,
     model_type="protbert",
     max_peptide_length=20,
+    use_protein_features=False,
+    flanking_size=5,
+    cfg=None,
 ):
-    """Tokenize the cleaned data without truncating allowed peptide residues."""
+    """Tokenize the cleaned data with optional flanking protein context."""
+    if cfg is not None:
+        dataset_name = getattr(cfg, "DATASET_NAME", dataset_name)
+        data_dir = getattr(cfg, "_DATASET_PATH", data_dir)
+        model_type = getattr(cfg, "MODEL_TYPE", model_type)
+        max_peptide_length = getattr(cfg, "MAX_PEPTIDE_LENGTH", max_peptide_length)
+        use_protein_features = getattr(cfg, "USE_PROTEIN_FEATURES", use_protein_features)
+        flanking_size = getattr(cfg, "FLANKING_SIZE", flanking_size)
+
     if model_type.lower() not in {"protbert", "esm2"}:
         raise ValueError("model_type must be either 'protbert' or 'esm2'.")
-    required_max_length = resolve_max_length(tokenizer, max_peptide_length)
+    if flanking_size < 0:
+        raise ValueError("flanking_size must be a non-negative integer.")
+
+    effective_max_peptide_length = (
+        max_peptide_length + 2 * flanking_size
+        if use_protein_features
+        else max_peptide_length
+    )
+    required_max_length = resolve_max_length(tokenizer, effective_max_peptide_length)
     if max_length is None:
         max_length = required_max_length
     elif max_length < required_max_length:
+        context_desc = (
+            f"with flanking_size={flanking_size}"
+            if use_protein_features
+            else "without flanking"
+        )
         raise ValueError(
             f"max_length={max_length} is too small for peptides up to "
-            f"{max_peptide_length} residues and {required_max_length - max_peptide_length} "
+            f"{effective_max_peptide_length} residues ({context_desc}) "
+            f"and {required_max_length - effective_max_peptide_length} "
             "tokenizer special tokens."
         )
     dataframe = prepare_dataset_frames(
         dataset_name=dataset_name,
         data_dir=data_dir,
         max_peptide_length=max_peptide_length,
+        use_protein_features=use_protein_features,
+        flanking_size=flanking_size,
     )
+    sequence_column = "flanked_seq" if use_protein_features else "peptide_seq"
     encodings = preprocess_for_protein_model(
         dataframe,
         tokenizer,
         model_type=model_type,
         max_length=max_length,
-        sequence_column="peptide_seq",
+        sequence_column=sequence_column,
     )
     return PeptideDataset(
         encodings,
@@ -133,8 +165,10 @@ def prepare_dataset_frames(
     dataset_name,
     data_dir="dataset",
     max_peptide_length=20,
+    use_protein_features=False,
+    flanking_size=5,
 ):
-    """Load and clean labeled examples with descriptors and protein metadata."""
+    """Load and clean labeled examples with descriptors and optional protein context."""
     dataset_name = dataset_name.lower()
     if dataset_name not in DATASET_FILENAMES:
         raise ValueError(
@@ -142,6 +176,8 @@ def prepare_dataset_frames(
         )
     if max_peptide_length < 1:
         raise ValueError("max_peptide_length must be positive.")
+    if flanking_size < 0:
+        raise ValueError("flanking_size must be a non-negative integer.")
 
     csv_path = Path(data_dir) / DATASET_FILENAMES[dataset_name]
     if not csv_path.is_file():
@@ -153,6 +189,8 @@ def prepare_dataset_frames(
         "parent_protein_id",
         *DESCRIPTOR_COLUMNS,
     }
+    if use_protein_features:
+        required_columns.update({"protein_seq", "start_position", "end_position"})
     missing = required_columns.difference(dataframe.columns)
     if missing:
         raise ValueError(f"{csv_path.name} is missing columns: {sorted(missing)}")
@@ -166,6 +204,26 @@ def prepare_dataset_frames(
     ]
     if dataframe["parent_protein_id"].isna().any():
         raise ValueError("'parent_protein_id' must not contain missing values.")
+
+    if use_protein_features:
+        if dataframe["protein_seq"].isna().any():
+            raise ValueError("'protein_seq' must not contain missing values.")
+        dataframe["protein_seq"] = [
+            _normalize_sequence(value, row_label=index)
+            for index, value in dataframe["protein_seq"].items()
+        ]
+        start_pos = pd.to_numeric(dataframe["start_position"], errors="coerce")
+        end_pos = pd.to_numeric(dataframe["end_position"], errors="coerce")
+        if start_pos.isna().any() or end_pos.isna().any():
+            raise ValueError("'start_position' and 'end_position' must be valid numbers.")
+        if not (start_pos % 1 == 0).all() or not (end_pos % 1 == 0).all():
+            raise ValueError("'start_position' and 'end_position' must be integers.")
+        if (start_pos < 1).any() or (end_pos < start_pos).any():
+            raise ValueError(
+                "Protein coordinates must be 1-based and end_position >= start_position."
+            )
+        dataframe["start_position"] = start_pos.astype("int64")
+        dataframe["end_position"] = end_pos.astype("int64")
 
     labels = pd.to_numeric(dataframe["target"], errors="raise")
     if labels.isna().any() or not labels.isin((0, 1)).all():
@@ -191,11 +249,29 @@ def prepare_dataset_frames(
     if dataframe.empty or dataframe["target"].nunique() != 2:
         raise ValueError("The cleaned dataset must contain examples of both classes.")
 
+    if use_protein_features:
+        dataframe["flanked_seq"] = [
+            extract_flanked_sequence(
+                peptide_seq=row["peptide_seq"],
+                protein_seq=row["protein_seq"],
+                start_position=row["start_position"],
+                end_position=row["end_position"],
+                flanking_size=flanking_size,
+                row_label=index,
+            )
+            for index, row in dataframe.iterrows()
+        ]
+
+    context_msg = (
+        f"; flanking context: {flanking_size} residues (N- and C-terminal)"
+        if use_protein_features
+        else ""
+    )
     print(
         f"TF cleaning ({dataset_name}): {input_rows:,} -> {len(dataframe):,} rows "
         f"(removed {removed_overlength:,} overlength, "
         f"{removed_conflicting:,} conflicting-label, "
-        f"{removed_duplicates:,} duplicate rows)."
+        f"{removed_duplicates:,} duplicate rows){context_msg}."
     )
     print(
         "TF class counts: "

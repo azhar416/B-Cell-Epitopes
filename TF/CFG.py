@@ -17,6 +17,8 @@ class CFG:
         self._SARS_DATASET_PATH = self.DATA_DIR / "input_sars.csv"
         self._SARS2_DATASET_PATH = self.DATA_DIR / "input_covid.csv"
         self.MAX_PEPTIDE_LENGTH = 20
+        self.USE_PROTEIN_FEATURES = True  # Set True to enable flanking protein context (Option B)
+        self.FLANKING_SIZE = 5  # Number of residues on N- and C-terminal flanks
 
         self.MODEL_TYPE = "esm2"  # choose "protbert" or "esm2"
         self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
@@ -71,6 +73,13 @@ class CFG:
             raise ValueError(
                 "MODEL_TYPE must be either 'protbert' or 'esm2'."
             ) from error
+
+    @property
+    def EFFECTIVE_PEPTIDE_LENGTH(self):
+        """Return maximum sequence length accounting for optional flanking residues."""
+        if self.USE_PROTEIN_FEATURES:
+            return self.MAX_PEPTIDE_LENGTH + 2 * self.FLANKING_SIZE
+        return self.MAX_PEPTIDE_LENGTH
 
     def set_debug(self, debug=True):
         self.DEBUG = debug

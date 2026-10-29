@@ -426,6 +426,12 @@ def train_model(
     print(f"  Dataset: {cfg.DATASET_NAME}")
     print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
+    protein_context_msg = (
+        f"enabled ({cfg.FLANKING_SIZE} residues flanking)"
+        if getattr(cfg, "USE_PROTEIN_FEATURES", False)
+        else "disabled"
+    )
+    print(f"  Protein context (Option B): {protein_context_msg}")
     msd_status = (
         f"enabled ({cfg.MSD_SAMPLES} samples)"
         if cfg.MSD_ENABLED
@@ -772,6 +778,8 @@ def train_model(
             "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,
             "use_lora": cfg.USE_LORA,
+            "use_protein_features": getattr(cfg, "USE_PROTEIN_FEATURES", False),
+            "flanking_size": getattr(cfg, "FLANKING_SIZE", 5),
             "lora_rank": cfg.LORA_RANK if cfg.USE_LORA else None,
             "lora_alpha": cfg.LORA_ALPHA if cfg.USE_LORA else None,
             "lora_dropout": cfg.LORA_DROPOUT if cfg.USE_LORA else None,
