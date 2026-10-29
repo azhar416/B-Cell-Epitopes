@@ -186,7 +186,11 @@ def run_training(config: CFG) -> dict[str, object]:
         data_dir=config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
     )
-    feature_frame = build_feature_frame(dataframe, feature_set=config.FEATURE_SET)
+    feature_frame = build_feature_frame(
+        dataframe,
+        feature_set=config.FEATURE_SET,
+        use_protein_features=config.USE_PROTEIN_FEATURES,
+    )
     labels = dataframe["target"].to_numpy(dtype=int)
     resampled_metadata = dataframe[
         ["peptide_seq", "target", "parent_protein_id"]
@@ -299,6 +303,7 @@ def run_training(config: CFG) -> dict[str, object]:
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
         "feature_set": config.FEATURE_SET,
+        "use_protein_features": config.USE_PROTEIN_FEATURES,
         "prediction_threshold": config.PREDICTION_THRESHOLD,
         "dataset_name": config.DATASET_NAME,
         "validation_size": config.VALIDATION_SIZE,
@@ -312,6 +317,7 @@ def run_training(config: CFG) -> dict[str, object]:
         "dataset": config.DATASET_NAME,
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
+        "use_protein_features": config.USE_PROTEIN_FEATURES,
         "split_strategy": (
             "smote_before_stratified_split"
             if config.USE_SMOTE

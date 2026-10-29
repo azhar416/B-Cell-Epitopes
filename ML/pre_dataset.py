@@ -39,8 +39,9 @@ def build_feature_frame(
     dataframe: pd.DataFrame,
     feature_set: str = "aac",
     sequence_column: str = "peptide_seq",
+    use_protein_features: bool = False,
 ) -> pd.DataFrame:
-    """Return AAC, length, optional dipeptide, and available descriptor features."""
+    """Build peptide features and optional full-protein AAC and position features."""
     feature_set = feature_set.lower()
     if feature_set not in {"aac", "aac_dipeptide"}:
         raise ValueError("feature_set must be 'aac' or 'aac_dipeptide'.")
@@ -60,6 +61,44 @@ def build_feature_frame(
     dipeptides = [first + second for first in AMINO_ACIDS for second in AMINO_ACIDS]
     if feature_set == "aac_dipeptide":
         features.update({f"dpc_{dipeptide}": [] for dipeptide in dipeptides})
+
+    protein_sequences = None
+    if use_protein_features:
+        required_columns = {"protein_seq", "start_position", "end_position"}
+        missing_columns = required_columns.difference(dataframe.columns)
+        if missing_columns:
+            raise ValueError(
+                "Protein features require columns: "
+                f"{sorted(missing_columns)}."
+            )
+        protein_sequences = [
+            normalize_sequence(value, row_label=index)
+            for index, value in dataframe["protein_seq"].items()
+        ]
+        start_positions = pd.to_numeric(
+            dataframe["start_position"],
+            errors="raise",
+        )
+        end_positions = pd.to_numeric(
+            dataframe["end_position"],
+            errors="raise",
+        )
+        if start_positions.isna().any() or end_positions.isna().any():
+            raise ValueError("Protein start/end positions must not be missing.")
+        if not (start_positions % 1 == 0).all() or not (
+            end_positions % 1 == 0
+        ).all():
+            raise ValueError("Protein start/end positions must be integers.")
+        if (start_positions < 1).any() or (end_positions < start_positions).any():
+            raise ValueError(
+                "Protein positions must be 1-based and end_position must be "
+                "greater than or equal to start_position."
+            )
+        for amino_acid in AMINO_ACIDS:
+            features[f"protein_aac_{amino_acid}"] = []
+        features["protein_aac_X"] = []
+        features["start_position"] = []
+        features["end_position"] = []
 
     for sequence in sequences:
         residue_counts = Counter(sequence)
@@ -81,6 +120,22 @@ def build_feature_frame(
                 features[f"dpc_{dipeptide}"].append(
                     pair_counts[dipeptide] / denominator
                 )
+
+    if use_protein_features:
+        for index, protein_sequence in enumerate(protein_sequences):
+            residue_counts = Counter(protein_sequence)
+            protein_length = len(protein_sequence)
+            for amino_acid in AMINO_ACIDS:
+                features[f"protein_aac_{amino_acid}"].append(
+                    residue_counts[amino_acid] / protein_length
+                )
+            features["protein_aac_X"].append(
+                residue_counts["X"] / protein_length
+            )
+            features["start_position"].append(
+                float(start_positions.iloc[index])
+            )
+            features["end_position"].append(float(end_positions.iloc[index]))
 
     result = pd.DataFrame(features, index=dataframe.index)
     for column in DESCRIPTOR_COLUMNS:

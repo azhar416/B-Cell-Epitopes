@@ -1,4 +1,4 @@
-"""SMOTE helpers for continuous DL feature representations."""
+"""SMOTE helpers for continuous TF feature representations."""
 
 import numpy as np
 from imblearn.over_sampling import SMOTE

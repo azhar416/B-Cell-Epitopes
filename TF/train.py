@@ -17,14 +17,14 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader, Subset, TensorDataset
 from tqdm.auto import tqdm
 
-from DL.CFG import CFG
-from DL.dataset import (
+from TF.CFG import CFG
+from TF.dataset import (
     DESCRIPTOR_COLUMNS,
     scale_descriptor_features,
     stratified_split_indices,
 )
-from DL.model import ESM2ForClassification, ProtBertForClassification
-from DL.oversampling import smote_resample
+from TF.model import ESM2ForClassification, ProtBertForClassification
+from TF.oversampling import smote_resample
 
 
 class BinaryFocalLoss(nn.Module):

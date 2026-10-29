@@ -7,7 +7,7 @@ from pathlib import Path
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 
-from DL.pre_dataset import preprocess_for_protein_model, resolve_max_length
+from TF.pre_dataset import preprocess_for_protein_model, resolve_max_length
 
 
 DATASET_FILENAMES = {
@@ -192,13 +192,13 @@ def prepare_dataset_frames(
         raise ValueError("The cleaned dataset must contain examples of both classes.")
 
     print(
-        f"DL cleaning ({dataset_name}): {input_rows:,} -> {len(dataframe):,} rows "
+        f"TF cleaning ({dataset_name}): {input_rows:,} -> {len(dataframe):,} rows "
         f"(removed {removed_overlength:,} overlength, "
         f"{removed_conflicting:,} conflicting-label, "
         f"{removed_duplicates:,} duplicate rows)."
     )
     print(
-        "DL class counts: "
+        "TF class counts: "
         f"{dataframe['target'].value_counts().sort_index().to_dict()}; "
         f"parent proteins: {dataframe['parent_protein_id'].nunique():,}."
     )

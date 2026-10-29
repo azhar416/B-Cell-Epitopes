@@ -14,6 +14,7 @@ class CFG:
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
     FEATURE_SET: str = "aac"
+    USE_PROTEIN_FEATURES: bool = False
     VALIDATION_SIZE: float = 0.2
     RANDOM_STATE: int = 42
     USE_SMOTE: bool = True

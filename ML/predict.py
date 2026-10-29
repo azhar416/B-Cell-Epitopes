@@ -12,8 +12,9 @@ def predict_peptides(
     sequences: list[str],
     model_path: str | Path = "ML/artifacts/peptide_classifier.joblib",
     descriptor_data: pd.DataFrame | None = None,
+    protein_context_data: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Predict sequences, requiring descriptors when the saved model uses them."""
+    """Predict peptides, requiring optional descriptors and protein context."""
     model_path = Path(model_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Saved model not found: {model_path}")
@@ -41,10 +42,33 @@ def predict_peptides(
         for column in used_descriptors:
             input_frame[column] = descriptor_data[column].to_numpy()
 
-    feature_frame = build_feature_frame(
-        input_frame,
-        feature_set=bundle["feature_set"],
-    ).reindex(columns=bundle["feature_names"])
+        use_protein_features = bool(bundle.get("use_protein_features", False))
+        if use_protein_features:
+            required_columns = {"protein_seq", "start_position", "end_position"}
+            if protein_context_data is None:
+                raise ValueError(
+                    "This model uses protein-context features. Pass "
+                    "protein_context_data containing protein_seq, start_position, "
+                    "and end_position."
+                )
+            missing = required_columns.difference(protein_context_data.columns)
+            if missing:
+                raise ValueError(
+                    "protein_context_data is missing required columns: "
+                    f"{sorted(missing)}."
+                )
+            if len(protein_context_data) != len(input_frame):
+                raise ValueError(
+                    "protein_context_data must have one row per peptide sequence."
+                )
+            for column in required_columns:
+                input_frame[column] = protein_context_data[column].to_numpy()
+
+        feature_frame = build_feature_frame(
+            input_frame,
+            feature_set=bundle["feature_set"],
+            use_protein_features=use_protein_features,
+        ).reindex(columns=bundle["feature_names"])
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])
     return pd.DataFrame(
