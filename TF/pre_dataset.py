@@ -10,15 +10,22 @@ def load_protbert_tokenizer(model_name="Rostlab/prot_bert"):
     return BertTokenizer.from_pretrained(model_name, do_lower_case=False)
 
 
-def load_protein_tokenizer(model_type, model_name):
+def load_protein_tokenizer(model_type, model_name, tokenizer_name=None):
     """Load the tokenizer paired with the selected protein language model."""
-    if model_type.lower() == "protbert":
+    model_type = model_type.lower()
+    if model_type == "protbert":
         return load_protbert_tokenizer(model_name)
-    if model_type.lower() == "esm2":
+    if model_type == "esm2":
         from transformers import AutoTokenizer
 
         return AutoTokenizer.from_pretrained(model_name)
-    raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+    if model_type == "prott5":
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(
+            tokenizer_name or "Rostlab/prot_t5_xl_uniref50"
+        )
+    raise ValueError("model_type must be 'protbert', 'esm2', or 'prott5'.")
 
 
 def resolve_max_length(tokenizer, max_peptide_length):
@@ -102,10 +109,10 @@ def preprocess_for_protein_model(
     sequence_column="peptide_seq",
     label_column="target",
 ):
-    """Normalize peptide sequences for ProtBert or ESM2 tokenization."""
+    """Normalize peptide sequences for ProtBert, ESM2, or ProtT5 tokenization."""
     model_type = model_type.lower()
-    if model_type not in {"protbert", "esm2"}:
-        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+    if model_type not in {"protbert", "esm2", "prott5"}:
+        raise ValueError("model_type must be 'protbert', 'esm2', or 'prott5'.")
     if max_length < 1:
         raise ValueError("max_length must be a positive integer.")
     if sequence_column not in dataframe or label_column not in dataframe:
@@ -134,7 +141,7 @@ def preprocess_for_protein_model(
             "X" if residue in rare_amino_acids else residue
             for residue in sequence
         )
-        if model_type == "protbert":
+        if model_type in {"protbert", "prott5"}:
             normalized_sequence = " ".join(normalized_sequence)
         sequences.append(normalized_sequence)
 
@@ -148,6 +155,7 @@ def preprocess_for_protein_model(
         padding="max_length",
         truncation=True,
         max_length=max_length,
+        return_special_tokens_mask=True,
     )
     encoded["labels"] = labels.tolist()
     return encoded

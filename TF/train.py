@@ -7,7 +7,6 @@ import torch
 import matplotlib.pyplot as plt
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
-from transformers import AutoModel
 from torch import nn
 from sklearn.metrics import (
     average_precision_score,
@@ -23,7 +22,13 @@ from TF.dataset import (
     scale_descriptor_features,
     stratified_split_indices,
 )
-from TF.model import ESM2ForClassification, ProtBertForClassification
+from TF.model import (
+    ESM2ForClassification,
+    ProtBertForClassification,
+    ProtT5ForClassification,
+    load_protein_encoder,
+    pool_protein_embeddings,
+)
 from TF.oversampling import smote_resample
 
 
@@ -122,17 +127,23 @@ def _build_model(cfg):
     model_classes = {
         "protbert": ProtBertForClassification,
         "esm2": ESM2ForClassification,
+        "prott5": ProtT5ForClassification,
     }
     model_type = cfg.MODEL_TYPE.lower()
     if model_type not in model_classes:
-        raise ValueError("MODEL_TYPE must be either 'protbert' or 'esm2'.")
+        raise ValueError("MODEL_TYPE must be 'protbert', 'esm2', or 'prott5'.")
+    lora_target_modules = (
+        cfg.PROTT5_LORA_TARGET_MODULES
+        if model_type == "prott5"
+        else cfg.LORA_TARGET_MODULES
+    )
     return model_classes[model_type](
         model_name=cfg.MODEL_NAME,
         use_lora=cfg.USE_LORA,
         lora_rank=cfg.LORA_RANK,
         lora_alpha=cfg.LORA_ALPHA,
         lora_dropout=cfg.LORA_DROPOUT,
-        lora_target_modules=cfg.LORA_TARGET_MODULES,
+        lora_target_modules=lora_target_modules,
         feature_fusion=cfg.FEATURE_FUSION,
         num_features=len(DESCRIPTOR_COLUMNS),
         msd_samples=cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
@@ -819,7 +830,10 @@ def _train_embedding_smote_split(dataset, cfg, device):
             f"count ({class_counts.min()})."
         )
 
-    encoder = AutoModel.from_pretrained(cfg.MODEL_NAME).to(device)
+    encoder = load_protein_encoder(
+        cfg.MODEL_TYPE,
+        cfg.MODEL_NAME,
+    ).to(device)
     encoder.eval()
     for parameter in encoder.parameters():
         parameter.requires_grad = False
@@ -845,8 +859,18 @@ def _train_embedding_smote_split(dataset, cfg, device):
             ):
                 model_inputs.pop("token_type_ids")
             outputs = encoder(**model_inputs)
+            special_tokens_mask = batch.get("special_tokens_mask")
             embedding_batches.append(
-                outputs.last_hidden_state[:, 0, :].cpu().numpy()
+                pool_protein_embeddings(
+                    outputs.last_hidden_state,
+                    model_inputs.get("attention_mask"),
+                    cfg.MODEL_TYPE,
+                    special_tokens_mask.to(device, non_blocking=True)
+                    if special_tokens_mask is not None
+                    else None,
+                )
+                .cpu()
+                .numpy()
             )
     sequence_embeddings = np.concatenate(embedding_batches).astype(np.float32)
     del encoder, sequence_loader

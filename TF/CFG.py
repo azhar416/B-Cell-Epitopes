@@ -20,7 +20,7 @@ class CFG:
         self.USE_PROTEIN_FEATURES = True  # Set True to enable flanking protein context (Option B)
         self.FLANKING_SIZE = 5  # Number of residues on N- and C-terminal flanks
 
-        self.MODEL_TYPE = "esm2"  # choose "protbert" or "esm2"
+        self.MODEL_TYPE = "esm2"  # choose "protbert", "esm2", or "prott5"
         self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5
@@ -29,6 +29,9 @@ class CFG:
         self.SMOTE_K_NEIGHBORS = 5
         self.PROTBERT_MODEL_NAME = "Rostlab/prot_bert"
         self.ESM2_MODEL_NAME = "facebook/esm2_t12_35M_UR50D"
+        self.PROTT5_MODEL_NAME = "Rostlab/prot_t5_xl_half_uniref50-enc"
+        self.PROTT5_TOKENIZER_NAME = "Rostlab/prot_t5_xl_uniref50"
+        self.PROTT5_LORA_TARGET_MODULES = ("q", "v")
         self.MAX_LENGTH = None  # Derived from peptide length and tokenizer special tokens.
         self.USE_MULTI_GPU = True
         self.FREEZE_ENCODER = True  # Freeze the pretrained encoder during linear probing
@@ -66,12 +69,13 @@ class CFG:
         model_names = {
             "protbert": self.PROTBERT_MODEL_NAME,
             "esm2": self.ESM2_MODEL_NAME,
+            "prott5": self.PROTT5_MODEL_NAME,
         }
         try:
             return model_names[self.MODEL_TYPE.lower()]
         except KeyError as error:
             raise ValueError(
-                "MODEL_TYPE must be either 'protbert' or 'esm2'."
+                "MODEL_TYPE must be 'protbert', 'esm2', or 'prott5'."
             ) from error
 
     @property

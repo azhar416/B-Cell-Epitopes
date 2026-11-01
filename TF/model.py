@@ -1,10 +1,56 @@
 import torch
 from torch import nn
-from transformers import AutoModel, BertConfig
+from transformers import AutoModel, BertConfig, T5EncoderModel
+
+
+def load_protein_encoder(model_type, model_name, model_config=None):
+    """Load the sequence encoder used by the selected protein language model."""
+    model_type = model_type.lower()
+    if model_type == "prott5":
+        return T5EncoderModel.from_pretrained(
+            model_name,
+            config=model_config,
+        )
+    if model_type in {"protbert", "esm2"}:
+        return AutoModel.from_pretrained(
+            model_name,
+            config=model_config,
+        )
+    raise ValueError("model_type must be 'protbert', 'esm2', or 'prott5'.")
+
+
+def pool_protein_embeddings(
+    hidden_states,
+    attention_mask,
+    model_type,
+    special_tokens_mask=None,
+):
+    """Pool encoder output using its classification token or ProtT5 residues."""
+    if model_type.lower() != "prott5":
+        return hidden_states[:, 0, :]
+
+    if attention_mask is None:
+        pooling_mask = torch.ones(
+            hidden_states.shape[:2],
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+    else:
+        pooling_mask = attention_mask.to(dtype=hidden_states.dtype)
+    if special_tokens_mask is not None:
+        pooling_mask = pooling_mask * (
+            1 - special_tokens_mask.to(dtype=hidden_states.dtype)
+        )
+    pooling_mask = pooling_mask.unsqueeze(-1)
+    return (hidden_states * pooling_mask).sum(dim=1) / pooling_mask.sum(
+        dim=1
+    ).clamp_min(1)
 
 
 class ProteinTransformerForClassification(nn.Module):
     """Protein encoder with optional numeric-feature fusion for classification."""
+
+    encoder_type = "esm2"
 
     def __init__(
         self,
@@ -26,9 +72,10 @@ class ProteinTransformerForClassification(nn.Module):
             raise ValueError("msd_samples must be at least 1.")
         if not 0 <= msd_dropout < 1:
             raise ValueError("msd_dropout must be in the range [0, 1).")
-        self.bert = AutoModel.from_pretrained(
+        self.bert = load_protein_encoder(
+            self.encoder_type,
             model_name,
-            config=model_config,
+            model_config=model_config,
         )
         self.use_lora = use_lora
 
@@ -117,6 +164,7 @@ class ProteinTransformerForClassification(nn.Module):
         attention_mask=None,
         token_type_ids=None,
         features=None,
+        special_tokens_mask=None,
     ):
         model_inputs = {
             "input_ids": input_ids,
@@ -125,7 +173,12 @@ class ProteinTransformerForClassification(nn.Module):
         if token_type_ids is not None and self.bert.config.model_type == "bert":
             model_inputs["token_type_ids"] = token_type_ids
         outputs = self.bert(**model_inputs)
-        cls_embedding = outputs.last_hidden_state[:, 0, :]
+        cls_embedding = pool_protein_embeddings(
+            outputs.last_hidden_state,
+            attention_mask,
+            self.encoder_type,
+            special_tokens_mask,
+        )
         if self.feature_fusion == "sequence_only":
             fused = cls_embedding
         else:
@@ -223,6 +276,8 @@ class ProteinTransformerForClassification(nn.Module):
 class ProtBertForClassification(ProteinTransformerForClassification):
     """ProtBert encoder with a binary classification head."""
 
+    encoder_type = "protbert"
+
     def __init__(self, model_name="Rostlab/prot_bert", **kwargs):
         bert_config = BertConfig.from_pretrained(model_name)
         super().__init__(
@@ -235,5 +290,20 @@ class ProtBertForClassification(ProteinTransformerForClassification):
 class ESM2ForClassification(ProteinTransformerForClassification):
     """ESM2 encoder with a binary classification head."""
 
+    encoder_type = "esm2"
+
     def __init__(self, model_name="facebook/esm2_t12_35M_UR50D", **kwargs):
+        super().__init__(model_name=model_name, **kwargs)
+
+
+class ProtT5ForClassification(ProteinTransformerForClassification):
+    """ProtT5 encoder with a binary classification head."""
+
+    encoder_type = "prott5"
+
+    def __init__(
+        self,
+        model_name="Rostlab/prot_t5_xl_half_uniref50-enc",
+        **kwargs,
+    ):
         super().__init__(model_name=model_name, **kwargs)

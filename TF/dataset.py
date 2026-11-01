@@ -112,8 +112,8 @@ def prepare_dataset(
         use_protein_features = getattr(cfg, "USE_PROTEIN_FEATURES", use_protein_features)
         flanking_size = getattr(cfg, "FLANKING_SIZE", flanking_size)
 
-    if model_type.lower() not in {"protbert", "esm2"}:
-        raise ValueError("model_type must be either 'protbert' or 'esm2'.")
+    if model_type.lower() not in {"protbert", "esm2", "prott5"}:
+        raise ValueError("model_type must be 'protbert', 'esm2', or 'prott5'.")
     if flanking_size < 0:
         raise ValueError("flanking_size must be a non-negative integer.")
 
