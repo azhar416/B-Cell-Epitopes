@@ -173,8 +173,10 @@ class ProteinTransformerForClassification(nn.Module):
         if token_type_ids is not None and self.bert.config.model_type == "bert":
             model_inputs["token_type_ids"] = token_type_ids
         outputs = self.bert(**model_inputs)
+        head_dtype = self.classifier_hidden[1].weight.dtype
+        sequence_embeddings = outputs.last_hidden_state.to(dtype=head_dtype)
         cls_embedding = pool_protein_embeddings(
-            outputs.last_hidden_state,
+            sequence_embeddings,
             attention_mask,
             self.encoder_type,
             special_tokens_mask,
@@ -190,6 +192,7 @@ class ProteinTransformerForClassification(nn.Module):
                 raise ValueError(
                     f"features must have shape (batch, {self.num_features})."
                 )
+            features = features.to(dtype=head_dtype)
             if self.feature_fusion == "weighted_concat":
                 feature_embedding = self.feature_encoder(features)
                 weights = torch.softmax(self.modality_weights, dim=0)
@@ -209,7 +212,6 @@ class ProteinTransformerForClassification(nn.Module):
                     self.feature_value_projection(features.unsqueeze(-1))
                     + self.feature_identity_embedding(feature_ids).unsqueeze(0)
                 )
-                sequence_embeddings = outputs.last_hidden_state
                 attended_features, _ = self.feature_cross_attention(
                     query=sequence_embeddings,
                     key=feature_tokens,
