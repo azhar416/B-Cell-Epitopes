@@ -1282,7 +1282,7 @@ def _evaluate_dataset(
     example_count = 0
     all_targets = []
     all_probabilities = []
-    with torch.inference_mode():
+    with torch.no_grad():
         for batch in data_loader:
             labels = batch.pop("labels").to(device, non_blocking=True)
             inputs = {
