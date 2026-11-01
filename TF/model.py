@@ -62,6 +62,7 @@ class ProteinTransformerForClassification(nn.Module):
         lora_dropout=0.1,
         lora_target_modules=("query", "value"),
         feature_fusion="sequence_only",
+        classifier_type="pooled_mlp",
         num_features=8,
         cross_attention_heads=8,
         msd_samples=1,
@@ -113,6 +114,56 @@ class ProteinTransformerForClassification(nn.Module):
         self.num_features = num_features
         self.msd_samples = msd_samples
         self.msd_dropout = nn.Dropout(p=msd_dropout)
+        self.classifier_type = classifier_type.lower()
+        if self.classifier_type not in {
+            "pooled_mlp",
+            "cnn",
+            "attention_pooling",
+            "bigru",
+        }:
+            raise ValueError(
+                "classifier_type must be 'pooled_mlp', 'cnn', "
+                "'attention_pooling', or 'bigru'."
+            )
+        if self.classifier_type == "cnn":
+            conv_channels = max(16, hidden_size // 4)
+            self.sequence_convolutions = nn.ModuleList(
+                [
+                    nn.Conv1d(
+                        hidden_size,
+                        conv_channels,
+                        kernel_size=kernel_size,
+                        padding=kernel_size // 2,
+                    )
+                    for kernel_size in (3, 5)
+                ]
+            )
+            self.sequence_convolution_projections = nn.ModuleList(
+                [
+                    nn.Linear(conv_channels * 2, hidden_size)
+                    for _ in self.sequence_convolutions
+                ]
+            )
+            self.sequence_convolution_output = nn.Sequential(
+                nn.Linear(hidden_size * 2, hidden_size),
+                nn.GELU(),
+            )
+        elif self.classifier_type == "attention_pooling":
+            self.sequence_attention = nn.Linear(hidden_size, 1)
+        elif self.classifier_type == "bigru":
+            recurrent_size = max(1, hidden_size // 2)
+            recurrent_output_size = recurrent_size * 2
+            self.sequence_gru = nn.GRU(
+                input_size=hidden_size,
+                hidden_size=recurrent_size,
+                batch_first=True,
+                bidirectional=True,
+            )
+            self.sequence_gru_projection = (
+                nn.Identity()
+                if recurrent_output_size == hidden_size
+                else nn.Linear(recurrent_output_size, hidden_size)
+            )
         classifier_input_size = hidden_size
         if self.feature_fusion == "weighted_concat":
             self.feature_encoder = nn.Sequential(
@@ -175,14 +226,36 @@ class ProteinTransformerForClassification(nn.Module):
         outputs = self.bert(**model_inputs)
         head_dtype = self.classifier_hidden[1].weight.dtype
         sequence_embeddings = outputs.last_hidden_state.to(dtype=head_dtype)
+        if attention_mask is None:
+            residue_mask = torch.ones(
+                sequence_embeddings.shape[:2],
+                dtype=torch.bool,
+                device=sequence_embeddings.device,
+            )
+        else:
+            residue_mask = attention_mask.to(
+                device=sequence_embeddings.device,
+                dtype=torch.bool,
+            )
+        if special_tokens_mask is not None:
+            residue_mask = residue_mask & ~special_tokens_mask.to(
+                device=sequence_embeddings.device,
+                dtype=torch.bool,
+            )
         cls_embedding = pool_protein_embeddings(
             sequence_embeddings,
             attention_mask,
             self.encoder_type,
             special_tokens_mask,
         )
+        sequence_embedding = cls_embedding
+        if self.classifier_type != "pooled_mlp":
+            sequence_embedding = self._pool_sequence_for_classifier(
+                sequence_embeddings,
+                residue_mask,
+            )
         if self.feature_fusion == "sequence_only":
-            fused = cls_embedding
+            fused = sequence_embedding
         else:
             if features is None:
                 raise ValueError(
@@ -198,7 +271,7 @@ class ProteinTransformerForClassification(nn.Module):
                 weights = torch.softmax(self.modality_weights, dim=0)
                 fused = torch.cat(
                     (
-                        weights[0] * cls_embedding,
+                        weights[0] * sequence_embedding,
                         weights[1] * feature_embedding,
                     ),
                     dim=-1,
@@ -232,15 +305,15 @@ class ProteinTransformerForClassification(nn.Module):
                     attended_features * sequence_mask
                 ).sum(dim=1) / sequence_mask.sum(dim=1).clamp_min(1)
                 fused = torch.cat(
-                    (cls_embedding, pooled_attended_features),
+                    (sequence_embedding, pooled_attended_features),
                     dim=-1,
                 )
             elif self.feature_fusion == "se":
                 feature_gate = self.se_feature_encoder(features)
-                fused = cls_embedding * feature_gate
+                fused = sequence_embedding * feature_gate
             elif self.feature_fusion == "gmu":
                 sequence_projection = torch.tanh(
-                    self.gmu_sequence_projection(cls_embedding)
+                    self.gmu_sequence_projection(sequence_embedding)
                 )
                 feature_projection = torch.tanh(
                     self.gmu_feature_projection(features)
@@ -273,6 +346,72 @@ class ProteinTransformerForClassification(nn.Module):
             )
             logits = self.classifier_output(classifier_input)
         return torch.sigmoid(logits).squeeze(-1)
+
+    def _pool_sequence_for_classifier(self, sequence_embeddings, residue_mask):
+        if not residue_mask.any(dim=1).all():
+            raise ValueError("Each sequence must contain at least one residue.")
+
+        if self.classifier_type == "attention_pooling":
+            scores = self.sequence_attention(sequence_embeddings).squeeze(-1)
+            scores = scores.masked_fill(~residue_mask, torch.finfo(scores.dtype).min)
+            weights = torch.softmax(scores, dim=1).unsqueeze(-1)
+            return (sequence_embeddings * weights).sum(dim=1)
+
+        if self.classifier_type == "cnn":
+            sequence_input = sequence_embeddings * residue_mask.unsqueeze(-1)
+            channels_first = sequence_input.transpose(1, 2)
+            pooled_branches = []
+            for convolution, projection in zip(
+                self.sequence_convolutions,
+                self.sequence_convolution_projections,
+            ):
+                activations = torch.relu(convolution(channels_first)).transpose(
+                    1,
+                    2,
+                )
+                masked_activations = activations.masked_fill(
+                    ~residue_mask.unsqueeze(-1),
+                    torch.finfo(activations.dtype).min,
+                )
+                maximum = masked_activations.max(dim=1).values
+                mean = (
+                    activations * residue_mask.unsqueeze(-1)
+                ).sum(dim=1) / residue_mask.sum(dim=1, keepdim=True).clamp_min(1)
+                pooled_branches.append(
+                    torch.relu(projection(torch.cat((maximum, mean), dim=-1)))
+                )
+            return self.sequence_convolution_output(
+                torch.cat(pooled_branches, dim=-1)
+            )
+
+        if self.classifier_type == "bigru":
+            positions = torch.arange(
+                1,
+                sequence_embeddings.shape[1] + 1,
+                device=residue_mask.device,
+            ).unsqueeze(0)
+            lengths = positions.masked_fill(~residue_mask, 0).max(dim=1).values
+            packed = nn.utils.rnn.pack_padded_sequence(
+                sequence_embeddings,
+                lengths.cpu(),
+                batch_first=True,
+                enforce_sorted=False,
+            )
+            packed_output, _ = self.sequence_gru(packed)
+            recurrent_output, _ = nn.utils.rnn.pad_packed_sequence(
+                packed_output,
+                batch_first=True,
+                total_length=sequence_embeddings.shape[1],
+            )
+            recurrent_output = self.sequence_gru_projection(recurrent_output)
+            weights = residue_mask.unsqueeze(-1).to(
+                dtype=recurrent_output.dtype
+            )
+            return (recurrent_output * weights).sum(dim=1) / weights.sum(
+                dim=1
+            ).clamp_min(1)
+
+        raise ValueError(f"Unsupported classifier_type: {self.classifier_type!r}.")
 
 
 class ProtBertForClassification(ProteinTransformerForClassification):

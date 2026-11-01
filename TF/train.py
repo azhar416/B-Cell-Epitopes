@@ -32,6 +32,14 @@ from TF.model import (
 from TF.oversampling import smote_resample
 
 
+CLASSIFIER_TYPES = {
+    "pooled_mlp",
+    "cnn",
+    "attention_pooling",
+    "bigru",
+}
+
+
 class BinaryFocalLoss(nn.Module):
     """Binary focal loss for probabilities produced by a sigmoid model."""
 
@@ -145,10 +153,24 @@ def _build_model(cfg):
         lora_dropout=cfg.LORA_DROPOUT,
         lora_target_modules=lora_target_modules,
         feature_fusion=cfg.FEATURE_FUSION,
+        classifier_type=getattr(cfg, "CLASSIFIER_TYPE", "pooled_mlp"),
         num_features=len(DESCRIPTOR_COLUMNS),
         msd_samples=cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
         msd_dropout=cfg.MSD_DROPOUT,
     )
+
+
+def _validate_classifier_type(cfg):
+    classifier_type = getattr(cfg, "CLASSIFIER_TYPE", "pooled_mlp")
+    if not isinstance(classifier_type, str):
+        raise ValueError("CLASSIFIER_TYPE must be a string.")
+    classifier_type = classifier_type.lower()
+    if classifier_type not in CLASSIFIER_TYPES:
+        raise ValueError(
+            "CLASSIFIER_TYPE must be pooled_mlp, cnn, attention_pooling, or bigru."
+        )
+    cfg.CLASSIFIER_TYPE = classifier_type
+    return classifier_type
 
 
 def _binary_metrics(targets, probabilities, threshold):
@@ -391,6 +413,7 @@ def train_model(
 ):
     """Train for fixed epochs and optionally log validation metrics each epoch."""
     cfg = cfg or CFG()
+    _validate_classifier_type(cfg)
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
     if cfg.BATCH_SIZE < 1:
@@ -437,6 +460,7 @@ def train_model(
     print(f"  Dataset: {cfg.DATASET_NAME}")
     print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
+    print(f"  Classifier: {cfg.CLASSIFIER_TYPE}")
     protein_context_msg = (
         f"enabled ({cfg.FLANKING_SIZE} residues flanking)"
         if getattr(cfg, "USE_PROTEIN_FEATURES", False)
@@ -781,6 +805,7 @@ def train_model(
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
             "feature_fusion": cfg.FEATURE_FUSION,
+            "classifier_type": cfg.CLASSIFIER_TYPE,
             "msd_enabled": cfg.MSD_ENABLED,
             "msd_samples": cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
             "msd_dropout": cfg.MSD_DROPOUT,
@@ -795,7 +820,13 @@ def train_model(
             "lora_alpha": cfg.LORA_ALPHA if cfg.USE_LORA else None,
             "lora_dropout": cfg.LORA_DROPOUT if cfg.USE_LORA else None,
             "lora_target_modules": (
-                cfg.LORA_TARGET_MODULES if cfg.USE_LORA else None
+                (
+                    cfg.PROTT5_LORA_TARGET_MODULES
+                    if cfg.MODEL_TYPE.lower() == "prott5"
+                    else cfg.LORA_TARGET_MODULES
+                )
+                if cfg.USE_LORA
+                else None
             ),
             "epochs_trained": len(history),
             "best_epoch": best_epoch,
@@ -1089,6 +1120,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
         {
             "model_state_dict": model.state_dict(),
             "model_type": "embedding_mlp",
+            "classifier_type": "pooled_mlp",
             "encoder_name": cfg.MODEL_NAME,
             "input_size": int(resampled_features.shape[1]),
             "descriptor_columns": list(DESCRIPTOR_COLUMNS),
@@ -1128,6 +1160,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
         "validation_metrics_interpretation": (
             "Biased: SMOTE was applied before the train/validation split."
         ),
+        "classifier_type": "pooled_mlp",
         "best_epoch": best_epoch,
     }
 
@@ -1140,8 +1173,14 @@ def train_validation_split(
 ):
     """Train once on 80% and evaluate the label-stratified 20% validation set."""
     cfg = cfg or CFG()
+    classifier_type = _validate_classifier_type(cfg)
     if not hasattr(dataset, "labels"):
         raise TypeError("dataset must expose a labels attribute.")
+    if classifier_type != "pooled_mlp" and cfg.USE_SMOTE:
+        raise ValueError(
+            "Alternative classifier heads require USE_SMOTE=False; "
+            "the embedding-SMOTE workflow uses its own MLP classifier."
+        )
     if cfg.USE_SMOTE:
         if model_factory is not None:
             raise ValueError(
@@ -1225,6 +1264,7 @@ def train_validation_split(
         "training_history_plot": history_plot,
         "evaluation_plots": evaluation_plots,
         "feature_fusion": cfg.FEATURE_FUSION,
+        "classifier_type": cfg.CLASSIFIER_TYPE,
         "descriptor_columns": list(DESCRIPTOR_COLUMNS),
     }
 

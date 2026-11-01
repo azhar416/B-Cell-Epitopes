@@ -21,6 +21,7 @@ class CFG:
         self.FLANKING_SIZE = 5  # Number of residues on N- and C-terminal flanks
 
         self.MODEL_TYPE = "esm2"  # choose "protbert", "esm2", or "prott5"
+        self.CLASSIFIER_TYPE = "pooled_mlp"  # pooled_mlp, cnn, attention_pooling, bigru
         self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5
