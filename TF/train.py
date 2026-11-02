@@ -154,6 +154,8 @@ def _build_model(cfg):
         lora_target_modules=lora_target_modules,
         feature_fusion=cfg.FEATURE_FUSION,
         classifier_type=getattr(cfg, "CLASSIFIER_TYPE", "pooled_mlp"),
+        cnn_channels=getattr(cfg, "CNN_CHANNELS", 128),
+        cnn_dropout=getattr(cfg, "CNN_DROPOUT", 0.3),
         num_features=len(DESCRIPTOR_COLUMNS),
         msd_samples=cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
         msd_dropout=cfg.MSD_DROPOUT,
@@ -170,6 +172,13 @@ def _validate_classifier_type(cfg):
             "CLASSIFIER_TYPE must be pooled_mlp, cnn, attention_pooling, or bigru."
         )
     cfg.CLASSIFIER_TYPE = classifier_type
+    cnn_channels = getattr(cfg, "CNN_CHANNELS", 128)
+    cnn_dropout = getattr(cfg, "CNN_DROPOUT", 0.3)
+    if classifier_type == "cnn":
+        if not isinstance(cnn_channels, int) or cnn_channels < 1:
+            raise ValueError("CNN_CHANNELS must be a positive integer.")
+        if not 0 <= cnn_dropout < 1:
+            raise ValueError("CNN_DROPOUT must be in the range [0, 1).")
     return classifier_type
 
 
@@ -461,6 +470,11 @@ def train_model(
     print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
     print(f"  Classifier: {cfg.CLASSIFIER_TYPE}")
+    if cfg.CLASSIFIER_TYPE == "cnn":
+        print(
+            f"  CNN channels per kernel: {cfg.CNN_CHANNELS}; "
+            f"CNN dropout: {cfg.CNN_DROPOUT:g}"
+        )
     protein_context_msg = (
         f"enabled ({cfg.FLANKING_SIZE} residues flanking)"
         if getattr(cfg, "USE_PROTEIN_FEATURES", False)
@@ -553,6 +567,12 @@ def train_model(
 
     model.to(device)
     train_loader = _make_loader(train_dataset, cfg, shuffle=True, device=device)
+    train_evaluation_loader = _make_loader(
+        train_dataset,
+        cfg,
+        shuffle=False,
+        device=device,
+    )
     validation_loader = (
         _make_loader(validation_dataset, cfg, shuffle=False, device=device)
         if validation_dataset is not None
@@ -679,11 +699,11 @@ def train_model(
             )
             progress_bar.set_postfix(
                 batch_loss=f"{loss.item():.4f}",
-                avg_loss=f"{total_loss / example_count:.4f}",
-                auc=f"{metrics['auc']:.4f}",
-                recall=f"{metrics['recall']:.4f}",
-                precision=f"{metrics['precision']:.4f}",
-                accuracy=f"{metrics['accuracy']:.4f}",
+                avg_optimization_loss=f"{total_loss / example_count:.4f}",
+                online_auc=f"{metrics['auc']:.4f}",
+                online_recall=f"{metrics['recall']:.4f}",
+                online_precision=f"{metrics['precision']:.4f}",
+                online_accuracy=f"{metrics['accuracy']:.4f}",
             )
 
         epoch_loss = total_loss / example_count
@@ -692,17 +712,25 @@ def train_model(
             epoch_probabilities,
             cfg.PREDICTION_THRESHOLD,
         )
+        training_metrics = _evaluate_dataset(
+            model=model,
+            data_loader=train_evaluation_loader,
+            criterion=criterion,
+            cfg=cfg,
+            device=device,
+        )
         epoch_record = {
             "epoch": epoch + 1,
-            "train_loss": epoch_loss,
-            "train_auc": metrics["auc"],
-            "train_pr_auc": metrics["pr_auc"],
-            "train_recall": metrics["recall"],
-            "train_precision": metrics["precision"],
-            "train_accuracy": metrics["accuracy"],
-            "train_balanced_accuracy": metrics["balanced_accuracy"],
-            "train_f1": metrics["f1"],
-            "train_mcc": metrics["mcc"],
+            "train_loss": training_metrics["loss"],
+            "training_optimization_loss": epoch_loss,
+            "train_auc": training_metrics["auc"],
+            "train_pr_auc": training_metrics["pr_auc"],
+            "train_recall": training_metrics["recall"],
+            "train_precision": training_metrics["precision"],
+            "train_accuracy": training_metrics["accuracy"],
+            "train_balanced_accuracy": training_metrics["balanced_accuracy"],
+            "train_f1": training_metrics["f1"],
+            "train_mcc": training_metrics["mcc"],
         }
         validation_metrics = None
         if validation_loader is not None:
@@ -763,11 +791,11 @@ def train_model(
         )
         print(
             f"{fold_label}Epoch {epoch + 1}/{cfg.EPOCHS} - "
-            f"train_loss: {epoch_loss:.4f}, "
-            f"train_auc: {metrics['auc']:.4f}, "
-            f"train_recall: {metrics['recall']:.4f}, "
-            f"train_precision: {metrics['precision']:.4f}, "
-            f"train_accuracy: {metrics['accuracy']:.4f}"
+            f"train_loss: {training_metrics['loss']:.4f}, "
+            f"train_auc: {training_metrics['auc']:.4f}, "
+            f"train_recall: {training_metrics['recall']:.4f}, "
+            f"train_precision: {training_metrics['precision']:.4f}, "
+            f"train_accuracy: {training_metrics['accuracy']:.4f}"
             + (
                 ""
                 if validation_metrics is None
@@ -806,6 +834,8 @@ def train_model(
             "model_type": cfg.MODEL_TYPE,
             "feature_fusion": cfg.FEATURE_FUSION,
             "classifier_type": cfg.CLASSIFIER_TYPE,
+            "cnn_channels": getattr(cfg, "CNN_CHANNELS", 128),
+            "cnn_dropout": getattr(cfg, "CNN_DROPOUT", 0.3),
             "msd_enabled": cfg.MSD_ENABLED,
             "msd_samples": cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
             "msd_dropout": cfg.MSD_DROPOUT,

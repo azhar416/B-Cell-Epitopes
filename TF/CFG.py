@@ -22,6 +22,8 @@ class CFG:
 
         self.MODEL_TYPE = "esm2"  # choose "protbert", "esm2", or "prott5"
         self.CLASSIFIER_TYPE = "pooled_mlp"  # pooled_mlp, cnn, attention_pooling, bigru
+        self.CNN_CHANNELS = 128
+        self.CNN_DROPOUT = 0.3
         self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5

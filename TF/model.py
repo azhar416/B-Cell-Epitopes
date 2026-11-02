@@ -63,6 +63,8 @@ class ProteinTransformerForClassification(nn.Module):
         lora_target_modules=("query", "value"),
         feature_fusion="sequence_only",
         classifier_type="pooled_mlp",
+        cnn_channels=128,
+        cnn_dropout=0.3,
         num_features=8,
         cross_attention_heads=8,
         msd_samples=1,
@@ -126,12 +128,15 @@ class ProteinTransformerForClassification(nn.Module):
                 "'attention_pooling', or 'bigru'."
             )
         if self.classifier_type == "cnn":
-            conv_channels = max(16, hidden_size // 4)
+            if cnn_channels < 1:
+                raise ValueError("cnn_channels must be at least 1.")
+            if not 0 <= cnn_dropout < 1:
+                raise ValueError("cnn_dropout must be in the range [0, 1).")
             self.sequence_convolutions = nn.ModuleList(
                 [
                     nn.Conv1d(
                         hidden_size,
-                        conv_channels,
+                        cnn_channels,
                         kernel_size=kernel_size,
                         padding=kernel_size // 2,
                     )
@@ -140,10 +145,11 @@ class ProteinTransformerForClassification(nn.Module):
             )
             self.sequence_convolution_projections = nn.ModuleList(
                 [
-                    nn.Linear(conv_channels * 2, hidden_size)
+                    nn.Linear(cnn_channels * 2, hidden_size)
                     for _ in self.sequence_convolutions
                 ]
             )
+            self.sequence_convolution_dropout = nn.Dropout(p=cnn_dropout)
             self.sequence_convolution_output = nn.Sequential(
                 nn.Linear(hidden_size * 2, hidden_size),
                 nn.GELU(),
@@ -378,7 +384,13 @@ class ProteinTransformerForClassification(nn.Module):
                     activations * residue_mask.unsqueeze(-1)
                 ).sum(dim=1) / residue_mask.sum(dim=1, keepdim=True).clamp_min(1)
                 pooled_branches.append(
-                    torch.relu(projection(torch.cat((maximum, mean), dim=-1)))
+                    torch.relu(
+                        projection(
+                            self.sequence_convolution_dropout(
+                                torch.cat((maximum, mean), dim=-1)
+                            )
+                        )
+                    )
                 )
             return self.sequence_convolution_output(
                 torch.cat(pooled_branches, dim=-1)
