@@ -341,6 +341,12 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "bcell_class_counts": (
             pd.Series(bcell_labels).value_counts().sort_index().to_dict()
         ),
+        "train_class_counts": (
+            pd.Series(bcell_labels).value_counts().sort_index().to_dict()
+        ),
+        "fit_class_counts": (
+            pd.Series(fit_labels).value_counts().sort_index().to_dict()
+        ),
         "sars_class_counts": (
             pd.Series(sars_labels).value_counts().sort_index().to_dict()
         ),
