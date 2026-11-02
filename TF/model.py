@@ -128,15 +128,20 @@ class ProteinTransformerForClassification(nn.Module):
                 "'attention_pooling', or 'bigru'."
             )
         if self.classifier_type == "cnn":
-            if cnn_channels < 1:
-                raise ValueError("cnn_channels must be at least 1.")
+            if cnn_channels == "legacy":
+                cnn_channels = max(16, hidden_size // 4)
+            elif not isinstance(cnn_channels, int) or cnn_channels < 1:
+                raise ValueError(
+                    "cnn_channels must be a positive integer or 'legacy'."
+                )
             if not 0 <= cnn_dropout < 1:
                 raise ValueError("cnn_dropout must be in the range [0, 1).")
+            self.cnn_channels = cnn_channels
             self.sequence_convolutions = nn.ModuleList(
                 [
                     nn.Conv1d(
                         hidden_size,
-                        cnn_channels,
+                        self.cnn_channels,
                         kernel_size=kernel_size,
                         padding=kernel_size // 2,
                     )
@@ -145,7 +150,7 @@ class ProteinTransformerForClassification(nn.Module):
             )
             self.sequence_convolution_projections = nn.ModuleList(
                 [
-                    nn.Linear(cnn_channels * 2, hidden_size)
+                    nn.Linear(self.cnn_channels * 2, hidden_size)
                     for _ in self.sequence_convolutions
                 ]
             )

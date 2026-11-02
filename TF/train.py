@@ -175,8 +175,12 @@ def _validate_classifier_type(cfg):
     cnn_channels = getattr(cfg, "CNN_CHANNELS", 128)
     cnn_dropout = getattr(cfg, "CNN_DROPOUT", 0.3)
     if classifier_type == "cnn":
-        if not isinstance(cnn_channels, int) or cnn_channels < 1:
-            raise ValueError("CNN_CHANNELS must be a positive integer.")
+        if cnn_channels != "legacy" and (
+            not isinstance(cnn_channels, int) or cnn_channels < 1
+        ):
+            raise ValueError(
+                "CNN_CHANNELS must be a positive integer or 'legacy'."
+            )
         if not 0 <= cnn_dropout < 1:
             raise ValueError("CNN_DROPOUT must be in the range [0, 1).")
     return classifier_type
@@ -471,8 +475,11 @@ def train_model(
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
     print(f"  Classifier: {cfg.CLASSIFIER_TYPE}")
     if cfg.CLASSIFIER_TYPE == "cnn":
+        cnn_channels = getattr(cfg, "CNN_CHANNELS", 128)
+        if cnn_channels == "legacy":
+            cnn_channels = max(16, model.bert.config.hidden_size // 4)
         print(
-            f"  CNN channels per kernel: {cfg.CNN_CHANNELS}; "
+            f"  CNN channels per kernel: {cnn_channels}; "
             f"CNN dropout: {cfg.CNN_DROPOUT:g}"
         )
     protein_context_msg = (
@@ -834,7 +841,8 @@ def train_model(
             "model_type": cfg.MODEL_TYPE,
             "feature_fusion": cfg.FEATURE_FUSION,
             "classifier_type": cfg.CLASSIFIER_TYPE,
-            "cnn_channels": getattr(cfg, "CNN_CHANNELS", 128),
+            "cnn_channels": getattr(model, "cnn_channels", None),
+            "cnn_channels_setting": getattr(cfg, "CNN_CHANNELS", 128),
             "cnn_dropout": getattr(cfg, "CNN_DROPOUT", 0.3),
             "msd_enabled": cfg.MSD_ENABLED,
             "msd_samples": cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
