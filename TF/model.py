@@ -69,6 +69,8 @@ class ProteinTransformerForClassification(nn.Module):
         cross_attention_heads=8,
         msd_samples=1,
         msd_dropout=0.3,
+        use_dipeptide_features=False,
+        num_dipeptide_features=400,
     ):
         super().__init__()
         if msd_samples < 1:
@@ -114,6 +116,8 @@ class ProteinTransformerForClassification(nn.Module):
                 "'cross_attention', 'se', or 'gmu'."
             )
         self.num_features = num_features
+        self.use_dipeptide_features = use_dipeptide_features
+        self.num_dipeptide_features = num_dipeptide_features
         self.msd_samples = msd_samples
         self.msd_dropout = nn.Dropout(p=msd_dropout)
         self.classifier_type = classifier_type.lower()
@@ -213,6 +217,14 @@ class ProteinTransformerForClassification(nn.Module):
             self.gmu_feature_projection = nn.Linear(num_features, hidden_size)
             self.gmu_gate = nn.Linear(hidden_size * 2, hidden_size)
 
+        if self.use_dipeptide_features:
+            self.dipeptide_feature_encoder = nn.Sequential(
+                nn.Linear(num_dipeptide_features, hidden_size),
+                nn.GELU(),
+                nn.Dropout(p=0.3),
+            )
+            classifier_input_size += hidden_size
+
         self.classifier_hidden = nn.Sequential(
             nn.Dropout(p=0.5),
             nn.Linear(classifier_input_size, hidden_size // 2),
@@ -227,6 +239,7 @@ class ProteinTransformerForClassification(nn.Module):
         token_type_ids=None,
         features=None,
         special_tokens_mask=None,
+        dipeptide_features=None,
     ):
         model_inputs = {
             "input_ids": input_ids,
@@ -341,6 +354,29 @@ class ProteinTransformerForClassification(nn.Module):
                     gate * sequence_projection
                     + (1 - gate) * feature_projection
                 )
+
+        if self.use_dipeptide_features:
+            if dipeptide_features is None:
+                raise ValueError(
+                    "DPC-enabled models require dipeptide_features."
+                )
+            if (
+                dipeptide_features.ndim != 2
+                or dipeptide_features.shape[1] != self.num_dipeptide_features
+            ):
+                raise ValueError(
+                    "dipeptide_features must have shape "
+                    f"(batch, {self.num_dipeptide_features})."
+                )
+            dipeptide_embedding = self.dipeptide_feature_encoder(
+                dipeptide_features.to(dtype=head_dtype)
+            )
+            fused = torch.cat((fused, dipeptide_embedding), dim=-1)
+        elif dipeptide_features is not None:
+            raise ValueError(
+                "dipeptide_features were supplied but the model is not "
+                "configured to use them."
+            )
 
         hidden = self.classifier_hidden(fused)
         if self.training and self.msd_samples > 1:

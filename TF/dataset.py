@@ -20,6 +20,14 @@ DATASET_FILENAMES = {
 }
 CANONICAL_AMINO_ACIDS = frozenset("ACDEFGHIKLMNPQRSTVWY")
 RARE_AMINO_ACIDS = frozenset("BUZO")
+DIPEPTIDE_COLUMNS = tuple(
+    first + second
+    for first in sorted(CANONICAL_AMINO_ACIDS)
+    for second in sorted(CANONICAL_AMINO_ACIDS)
+)
+DIPEPTIDE_INDICES = {
+    pair: index for index, pair in enumerate(DIPEPTIDE_COLUMNS)
+}
 DESCRIPTOR_COLUMNS = (
     "chou_fasman",
     "emini",
@@ -48,6 +56,21 @@ def _normalize_sequence(value, row_label):
     return "".join("X" if residue in RARE_AMINO_ACIDS else residue for residue in sequence)
 
 
+def dipeptide_composition(sequence):
+    """Return normalized frequencies for the 400 canonical residue pairs."""
+    sequence = _normalize_sequence(sequence, row_label="DPC input")
+    pair_counts = np.zeros(len(DIPEPTIDE_COLUMNS), dtype=np.float32)
+    valid_pair_count = 0
+    for first, second in zip(sequence, sequence[1:]):
+        pair_index = DIPEPTIDE_INDICES.get(first + second)
+        if pair_index is not None:
+            pair_counts[pair_index] += 1
+            valid_pair_count += 1
+    if valid_pair_count:
+        pair_counts /= valid_pair_count
+    return pair_counts
+
+
 class PeptideDataset(Dataset):
     """Tokenized peptide examples compatible with a PyTorch DataLoader."""
 
@@ -56,6 +79,7 @@ class PeptideDataset(Dataset):
         encodings,
         group_ids=None,
         descriptor_features=None,
+        dipeptide_features=None,
     ):
         self.encodings = {
             key: torch.tensor(values, dtype=torch.long)
@@ -66,6 +90,11 @@ class PeptideDataset(Dataset):
         self.descriptor_features = (
             torch.tensor(descriptor_features, dtype=torch.float32)
             if descriptor_features is not None
+            else None
+        )
+        self.dipeptide_features = (
+            torch.tensor(dipeptide_features, dtype=torch.float32)
+            if dipeptide_features is not None
             else None
         )
         self.group_ids = (
@@ -80,6 +109,13 @@ class PeptideDataset(Dataset):
             raise ValueError(
                 "descriptor_features must contain one row per example."
             )
+        if (
+            self.dipeptide_features is not None
+            and len(self.dipeptide_features) != len(self.labels)
+        ):
+            raise ValueError(
+                "dipeptide_features must contain one row per example."
+            )
 
     def __len__(self):
         return len(self.labels)
@@ -88,6 +124,8 @@ class PeptideDataset(Dataset):
         item = {key: values[index] for key, values in self.encodings.items()}
         if self.descriptor_features is not None:
             item["features"] = self.descriptor_features[index]
+        if self.dipeptide_features is not None:
+            item["dipeptide_features"] = self.dipeptide_features[index]
         item["labels"] = self.labels[index]
         return item
 
@@ -102,6 +140,7 @@ def prepare_dataset(
     use_protein_features=False,
     flanking_size=5,
     cfg=None,
+    use_dipeptide_features=False,
 ):
     """Tokenize the cleaned data with optional flanking protein context."""
     if cfg is not None:
@@ -111,6 +150,11 @@ def prepare_dataset(
         max_peptide_length = getattr(cfg, "MAX_PEPTIDE_LENGTH", max_peptide_length)
         use_protein_features = getattr(cfg, "USE_PROTEIN_FEATURES", use_protein_features)
         flanking_size = getattr(cfg, "FLANKING_SIZE", flanking_size)
+        use_dipeptide_features = getattr(
+            cfg,
+            "USE_DIPEPTIDE_FEATURES",
+            use_dipeptide_features,
+        )
 
     if model_type.lower() not in {"protbert", "esm2", "prott5"}:
         raise ValueError("model_type must be 'protbert', 'esm2', or 'prott5'.")
@@ -152,12 +196,20 @@ def prepare_dataset(
         max_length=max_length,
         sequence_column=sequence_column,
     )
+    dipeptide_features = (
+        np.stack(
+            dataframe["peptide_seq"].map(dipeptide_composition).to_numpy()
+        )
+        if use_dipeptide_features
+        else None
+    )
     return PeptideDataset(
         encodings,
         group_ids=dataframe["parent_protein_id"].to_numpy(),
         descriptor_features=dataframe[list(DESCRIPTOR_COLUMNS)].to_numpy(
             dtype=np.float32
         ),
+        dipeptide_features=dipeptide_features,
     )
 
 
@@ -282,10 +334,20 @@ def prepare_dataset_frames(
 
 
 def scale_descriptor_features(dataset, train_indices):
-    """Fit imputation and scaling on training rows and transform all rows."""
-    if dataset.descriptor_features is None:
-        raise ValueError("Dataset does not contain descriptor features.")
-    raw_features = dataset.descriptor_features.detach().cpu().numpy()
+    """Fit descriptor imputation/scaling on training rows and transform all rows."""
+    return _scale_dataset_features(dataset, train_indices, "descriptor_features")
+
+
+def scale_dipeptide_features(dataset, train_indices):
+    """Fit DPC scaling on training rows and transform all rows."""
+    return _scale_dataset_features(dataset, train_indices, "dipeptide_features")
+
+
+def _scale_dataset_features(dataset, train_indices, feature_attribute):
+    raw_tensor = getattr(dataset, feature_attribute)
+    if raw_tensor is None:
+        raise ValueError(f"Dataset does not contain {feature_attribute}.")
+    raw_features = raw_tensor.detach().cpu().numpy()
     train_features = raw_features[np.asarray(train_indices, dtype=np.int64)]
     if train_features.size == 0:
         raise ValueError("Training indices must select at least one example.")
@@ -296,9 +358,13 @@ def scale_descriptor_features(dataset, train_indices):
     scaler.fit(train_imputed)
     all_imputed = imputer.transform(raw_features)
     scaled_features = scaler.transform(all_imputed).astype(np.float32)
-    dataset.descriptor_features = torch.tensor(
-        scaled_features,
-        dtype=torch.float32,
+    setattr(
+        dataset,
+        feature_attribute,
+        torch.tensor(
+            scaled_features,
+            dtype=torch.float32,
+        ),
     )
     return imputer, scaler
 

@@ -19,6 +19,7 @@ class CFG:
         self.MAX_PEPTIDE_LENGTH = 20
         self.USE_PROTEIN_FEATURES = True  # Set True to enable flanking protein context (Option B)
         self.FLANKING_SIZE = 5  # Number of residues on N- and C-terminal flanks
+        self.USE_DIPEPTIDE_FEATURES = False  # Add 400-dimensional peptide DPC features.
 
         self.MODEL_TYPE = "esm2"  # choose "protbert", "esm2", or "prott5"
         self.CLASSIFIER_TYPE = "pooled_mlp"  # pooled_mlp, cnn, attention_pooling, bigru

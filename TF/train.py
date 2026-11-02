@@ -18,7 +18,9 @@ from tqdm.auto import tqdm
 
 from TF.CFG import CFG
 from TF.dataset import (
+    DIPEPTIDE_COLUMNS,
     DESCRIPTOR_COLUMNS,
+    scale_dipeptide_features,
     scale_descriptor_features,
     stratified_split_indices,
 )
@@ -157,6 +159,12 @@ def _build_model(cfg):
         cnn_channels=getattr(cfg, "CNN_CHANNELS", 128),
         cnn_dropout=getattr(cfg, "CNN_DROPOUT", 0.3),
         num_features=len(DESCRIPTOR_COLUMNS),
+        use_dipeptide_features=getattr(
+            cfg,
+            "USE_DIPEPTIDE_FEATURES",
+            False,
+        ),
+        num_dipeptide_features=len(DIPEPTIDE_COLUMNS),
         msd_samples=cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
         msd_dropout=cfg.MSD_DROPOUT,
     )
@@ -850,6 +858,16 @@ def train_model(
             "msd_samples": cfg.MSD_SAMPLES if cfg.MSD_ENABLED else 1,
             "msd_dropout": cfg.MSD_DROPOUT,
             "descriptor_columns": list(DESCRIPTOR_COLUMNS),
+            "use_dipeptide_features": getattr(
+                cfg,
+                "USE_DIPEPTIDE_FEATURES",
+                False,
+            ),
+            "dipeptide_columns": (
+                list(DIPEPTIDE_COLUMNS)
+                if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False)
+                else None
+            ),
             "feature_preprocessing": feature_preprocessing,
             "loss_function": cfg.LOSS_FUNCTION,
             "freeze_encoder": cfg.FREEZE_ENCODER,
@@ -954,8 +972,23 @@ def _train_embedding_smote_split(dataset, cfg, device):
         keep_empty_features=True,
     )
     imputed_descriptors = descriptor_imputer.fit_transform(raw_descriptors)
+    feature_blocks = [sequence_embeddings, imputed_descriptors]
+    if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False):
+        if dataset.dipeptide_features is None:
+            raise ValueError(
+                "USE_DIPEPTIDE_FEATURES=True, but the dataset has no DPC "
+                "features. Prepare it with cfg=cfg."
+            )
+        dpc_imputer = SimpleImputer(
+            strategy="median",
+            keep_empty_features=True,
+        )
+        imputed_dipeptides = dpc_imputer.fit_transform(
+            dataset.dipeptide_features.detach().cpu().numpy()
+        )
+        feature_blocks.append(imputed_dipeptides)
     all_features = np.concatenate(
-        [sequence_embeddings, imputed_descriptors],
+        feature_blocks,
         axis=1,
     )
     feature_scaler = StandardScaler()
@@ -1164,11 +1197,26 @@ def _train_embedding_smote_split(dataset, cfg, device):
             "encoder_name": cfg.MODEL_NAME,
             "input_size": int(resampled_features.shape[1]),
             "descriptor_columns": list(DESCRIPTOR_COLUMNS),
+            "use_dipeptide_features": getattr(
+                cfg,
+                "USE_DIPEPTIDE_FEATURES",
+                False,
+            ),
+            "dipeptide_columns": (
+                list(DIPEPTIDE_COLUMNS)
+                if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False)
+                else None
+            ),
             "use_smote": True,
             "smote_k_neighbors": cfg.SMOTE_K_NEIGHBORS,
             "feature_scaler_mean": feature_scaler.mean_,
             "feature_scaler_scale": feature_scaler.scale_,
             "descriptor_imputer_statistics": descriptor_imputer.statistics_,
+            "dipeptide_imputer_statistics": (
+                dpc_imputer.statistics_
+                if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False)
+                else None
+            ),
             "best_epoch": best_epoch,
             "best_validation_auc": best_validation_auc,
             "history": history,
@@ -1216,6 +1264,18 @@ def train_validation_split(
     classifier_type = _validate_classifier_type(cfg)
     if not hasattr(dataset, "labels"):
         raise TypeError("dataset must expose a labels attribute.")
+    use_dipeptide_features = getattr(cfg, "USE_DIPEPTIDE_FEATURES", False)
+    if not isinstance(use_dipeptide_features, bool):
+        raise ValueError("USE_DIPEPTIDE_FEATURES must be a boolean.")
+    if use_dipeptide_features and getattr(dataset, "dipeptide_features", None) is None:
+        raise ValueError(
+            "USE_DIPEPTIDE_FEATURES=True, but the dataset has no DPC features. "
+            "Prepare it with cfg=cfg."
+        )
+    if not use_dipeptide_features and getattr(dataset, "dipeptide_features", None) is not None:
+        raise ValueError(
+            "The dataset contains DPC features, but USE_DIPEPTIDE_FEATURES=False."
+        )
     if classifier_type != "pooled_mlp" and cfg.USE_SMOTE:
         raise ValueError(
             "Alternative classifier heads require USE_SMOTE=False; "
@@ -1240,6 +1300,26 @@ def train_validation_split(
     )
     model_dataset = copy(dataset)
     imputer, scaler = scale_descriptor_features(model_dataset, train_indices)
+    feature_preprocessing = {
+        "imputer_statistics": imputer.statistics_,
+        "scaler_mean": scaler.mean_,
+        "scaler_scale": scaler.scale_,
+    }
+    if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False):
+        if model_dataset.dipeptide_features is None:
+            raise ValueError(
+                "USE_DIPEPTIDE_FEATURES=True, but the dataset has no DPC "
+                "features. Prepare it with cfg=cfg."
+            )
+        dpc_imputer, dpc_scaler = scale_dipeptide_features(
+            model_dataset,
+            train_indices,
+        )
+        feature_preprocessing["dipeptide_imputer_statistics"] = (
+            dpc_imputer.statistics_
+        )
+        feature_preprocessing["dipeptide_scaler_mean"] = dpc_scaler.mean_
+        feature_preprocessing["dipeptide_scaler_scale"] = dpc_scaler.scale_
     train_subset = Subset(model_dataset, train_indices.tolist())
     validation_subset = Subset(model_dataset, validation_indices.tolist())
     print(
@@ -1256,11 +1336,7 @@ def train_validation_split(
         checkpoint_path=cfg.CHECKPOINT_PATH,
         seed=cfg.SEED,
         validation_dataset=validation_subset,
-        feature_preprocessing={
-            "imputer_statistics": imputer.statistics_,
-            "scaler_mean": scaler.mean_,
-            "scaler_scale": scaler.scale_,
-        },
+        feature_preprocessing=feature_preprocessing,
     )
     history_plot = _save_training_history_plot(
         history,
@@ -1306,6 +1382,11 @@ def train_validation_split(
         "feature_fusion": cfg.FEATURE_FUSION,
         "classifier_type": cfg.CLASSIFIER_TYPE,
         "descriptor_columns": list(DESCRIPTOR_COLUMNS),
+        "use_dipeptide_features": getattr(
+            cfg,
+            "USE_DIPEPTIDE_FEATURES",
+            False,
+        ),
     }
 
 
