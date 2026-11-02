@@ -474,14 +474,6 @@ def train_model(
     print(f"  Training examples: {len(train_dataset):,}")
     print(f"  Loss function: {cfg.LOSS_FUNCTION}")
     print(f"  Classifier: {cfg.CLASSIFIER_TYPE}")
-    if cfg.CLASSIFIER_TYPE == "cnn":
-        cnn_channels = getattr(cfg, "CNN_CHANNELS", 128)
-        if cnn_channels == "legacy":
-            cnn_channels = max(16, model.bert.config.hidden_size // 4)
-        print(
-            f"  CNN channels per kernel: {cnn_channels}; "
-            f"CNN dropout: {cfg.CNN_DROPOUT:g}"
-        )
     protein_context_msg = (
         f"enabled ({cfg.FLANKING_SIZE} residues flanking)"
         if getattr(cfg, "USE_PROTEIN_FEATURES", False)
@@ -525,6 +517,16 @@ def train_model(
     model = model or _build_model(cfg)
     if isinstance(model, nn.DataParallel):
         model = model.module
+    if cfg.CLASSIFIER_TYPE == "cnn":
+        cnn_channels = getattr(
+            model,
+            "cnn_channels",
+            getattr(cfg, "CNN_CHANNELS", 128),
+        )
+        print(
+            f"  CNN channels per kernel: {cnn_channels}; "
+            f"CNN dropout: {getattr(cfg, 'CNN_DROPOUT', 0.3):g}"
+        )
     print("Model architecture:")
     print(model)
     model_uses_lora = getattr(model, "use_lora", False)
