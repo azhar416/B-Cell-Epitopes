@@ -138,6 +138,9 @@ def save_train_validation_metrics_plot(
     train_metrics: dict[str, float | int],
     validation_metrics: dict[str, float | int],
     output_dir: Path,
+    train_label: str = "Training",
+    validation_label: str = "Validation",
+    title: str = "Training vs validation metrics",
 ) -> str:
     """Save a comparison of fitted-model training and validation metrics."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,16 +158,16 @@ def save_train_validation_metrics_plot(
     validation_values = [validation_metrics[key] for _, key in metric_names]
 
     figure, axis = plt.subplots(figsize=(10, 5.5))
-    axis.bar(positions - width / 2, train_values, width, label="Training")
+    axis.bar(positions - width / 2, train_values, width, label=train_label)
     axis.bar(
         positions + width / 2,
         validation_values,
         width,
-        label="Validation",
+        label=validation_label,
     )
     axis.set(
         ylabel="Score",
-        title="Training vs validation metrics",
+        title=title,
         xticks=positions,
         xticklabels=[name for name, _ in metric_names],
         ylim=(-1.05, 1.05),
@@ -178,9 +181,227 @@ def save_train_validation_metrics_plot(
     return str(plot_path)
 
 
+def _build_configured_features(dataframe: pd.DataFrame, config: CFG) -> pd.DataFrame:
+    return build_feature_frame(
+        dataframe,
+        use_peptide_features=config.USE_PEPTIDE_FEATURES,
+        use_protein_features=config.USE_PROTEIN_FEATURES,
+        use_biological_features=config.USE_BIOLOGICAL_FEATURES,
+        peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
+    )
+
+
+def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
+    """Train on all cleaned B-cell rows and score a stratified SARS holdout."""
+    bcell_data = load_labeled_dataset(
+        dataset_name="bcell",
+        data_dir=config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+    )
+    sars_data = load_labeled_dataset(
+        dataset_name="sars",
+        data_dir=config.EVALUATION_DATA_DIR or config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+    )
+    bcell_features = _build_configured_features(bcell_data, config)
+    sars_features = _build_configured_features(sars_data, config)
+    if not bcell_features.columns.equals(sars_features.columns):
+        raise ValueError(
+            "B-cell and SARS feature columns do not match. "
+            "Check that both datasets contain the selected feature inputs."
+        )
+
+    bcell_labels = bcell_data["target"].to_numpy(dtype=int)
+    sars_labels = sars_data["target"].to_numpy(dtype=int)
+    _, sars_validation_indices = make_stratified_split(
+        labels=sars_labels,
+        validation_size=config.VALIDATION_SIZE,
+        random_state=config.RANDOM_STATE,
+    )
+    sars_train_indices = np.setdiff1d(
+        np.arange(len(sars_data)),
+        sars_validation_indices,
+        assume_unique=True,
+    )
+
+    original_bcell_size = len(bcell_labels)
+    fit_features, fit_labels, synthetic_count = smote_resample(
+        bcell_features,
+        bcell_labels,
+        enabled=config.USE_SMOTE,
+        random_state=config.RANDOM_STATE,
+        k_neighbors=config.SMOTE_K_NEIGHBORS,
+    )
+    if config.USE_SMOTE:
+        print(
+            "Cross-dataset mode: SMOTE was applied to B-cell training rows only; "
+            "SARS validation rows remain untouched."
+        )
+    else:
+        print("Cross-dataset mode: SMOTE disabled.")
+
+    model = build_model(
+        model_type=config.MODEL_TYPE,
+        random_state=config.RANDOM_STATE,
+        random_forest_trees=config.RANDOM_FOREST_TREES,
+    )
+    model.fit(fit_features, fit_labels)
+
+    train_probabilities = model.predict_proba(bcell_features)[:, 1]
+    train_metrics = calculate_metrics(
+        bcell_labels,
+        train_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+    )
+    validation_features = sars_features.iloc[sars_validation_indices]
+    validation_labels = sars_labels[sars_validation_indices]
+    validation_probabilities = model.predict_proba(validation_features)[:, 1]
+    validation_metrics = calculate_metrics(
+        validation_labels,
+        validation_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+    )
+
+    output_dir = config.OUTPUT_DIR / "bcell_to_sars"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    comparison_plot = save_train_validation_metrics_plot(
+        train_metrics,
+        validation_metrics,
+        output_dir,
+        train_label="B-cell training",
+        validation_label="SARS holdout",
+        title="B-cell training vs SARS holdout",
+    )
+    evaluation_plots = save_evaluation_plots(
+        validation_labels,
+        validation_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+        output_dir=output_dir,
+    )
+    sars_validation = sars_data.iloc[sars_validation_indices]
+    pd.DataFrame(
+        {
+            "peptide_seq": sars_validation["peptide_seq"].to_numpy(),
+            "target": validation_labels,
+            "parent_protein_id": sars_validation[
+                "parent_protein_id"
+            ].to_numpy(),
+            "is_synthetic": False,
+            "validation_probability": validation_probabilities,
+            "validation_prediction": (
+                validation_probabilities >= config.PREDICTION_THRESHOLD
+            ).astype(int),
+        }
+    ).to_csv(output_dir / "validation_predictions.csv", index=False)
+
+    sars_sequences = set(sars_data["peptide_seq"])
+    bcell_sequences = set(bcell_data["peptide_seq"])
+    overlapping_sequences = len(sars_sequences.intersection(bcell_sequences))
+    if overlapping_sequences:
+        print(
+            "Warning: "
+            f"{overlapping_sequences} unique peptide sequences occur in both "
+            "B-cell training data and cleaned SARS data."
+        )
+
+    bundle = {
+        "model": model,
+        "feature_names": bcell_features.columns.tolist(),
+        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
+        "use_protein_features": config.USE_PROTEIN_FEATURES,
+        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
+        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
+        "prediction_threshold": config.PREDICTION_THRESHOLD,
+        "training_dataset": "bcell",
+        "evaluation_dataset": "sars",
+        "training_mode": config.TRAINING_MODE,
+        "artifact_directory": str(output_dir),
+        "random_state": config.RANDOM_STATE,
+        "use_smote": config.USE_SMOTE,
+        "smote_k_neighbors": config.SMOTE_K_NEIGHBORS,
+    }
+    dump(bundle, output_dir / "peptide_classifier.joblib")
+
+    report: dict[str, object] = {
+        "training_dataset": "bcell",
+        "evaluation_dataset": "sars",
+        "training_mode": config.TRAINING_MODE,
+        "model": config.MODEL_TYPE,
+        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
+        "use_protein_features": config.USE_PROTEIN_FEATURES,
+        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
+        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
+        "split_strategy": "stratified_sars_holdout",
+        "train_size": original_bcell_size,
+        "validation_size": len(sars_validation_indices),
+        "sars_train_unused_size": len(sars_train_indices),
+        "train_fraction": 1.0,
+        "validation_fraction": len(sars_validation_indices) / len(sars_data),
+        "n_synthetic_examples": synthetic_count,
+        "bcell_class_counts": (
+            pd.Series(bcell_labels).value_counts().sort_index().to_dict()
+        ),
+        "sars_class_counts": (
+            pd.Series(sars_labels).value_counts().sort_index().to_dict()
+        ),
+        "sars_train_class_counts": (
+            pd.Series(sars_labels[sars_train_indices])
+            .value_counts()
+            .sort_index()
+            .to_dict()
+        ),
+        "validation_class_counts": (
+            pd.Series(validation_labels).value_counts().sort_index().to_dict()
+        ),
+        "overlapping_unique_peptide_sequences": overlapping_sequences,
+        "threshold": config.PREDICTION_THRESHOLD,
+        "training_metrics": train_metrics,
+        "validation_metrics": validation_metrics,
+        "training_validation_metrics_plot": comparison_plot,
+        "evaluation_plots": evaluation_plots,
+        "validation_predictions": str(output_dir / "validation_predictions.csv"),
+        "artifact_directory": str(output_dir),
+        "resampling": (
+            {
+                "method": "SMOTE",
+                "scope": "B-cell training data only",
+                "k_neighbors": config.SMOTE_K_NEIGHBORS,
+            }
+            if config.USE_SMOTE
+            else {"method": "none"}
+        ),
+        "validation_metrics_interpretation": (
+            "Metrics use the stratified SARS holdout only. The remaining "
+            "SARS rows were not used for training or evaluation."
+        ),
+        "configuration": {
+            key: str(value) if isinstance(value, Path) else value
+            for key, value in asdict(config).items()
+        },
+    }
+    with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
+        json.dump(report, file, indent=2)
+
+    print(
+        f"Cross-dataset split: train on {original_bcell_size:,} B-cell rows; "
+        f"evaluate on {len(sars_validation_indices):,}/{len(sars_data):,} "
+        f"SARS rows ({config.VALIDATION_SIZE:.0%} holdout)."
+    )
+    print(
+        f"SARS holdout ROC-AUC={validation_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={validation_metrics['pr_auc']:.4f}, "
+        f"F1={validation_metrics['f1']:.4f}"
+    )
+    print(f"Saved cross-dataset artifacts to: {output_dir}")
+    return report
+
+
 def run_training(config: CFG) -> dict[str, object]:
-    """Optionally apply SMOTE before the label-stratified train/validation split."""
+    """Run same-dataset training or B-cell-to-SARS transfer evaluation."""
     config.validate()
+    if config.TRAINING_MODE == "bcell_to_sars":
+        return _run_bcell_to_sars(config)
+
     dataframe = load_labeled_dataset(
         dataset_name=config.DATASET_NAME,
         data_dir=config.DATA_DIR,
@@ -310,6 +531,7 @@ def run_training(config: CFG) -> dict[str, object]:
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
         "prediction_threshold": config.PREDICTION_THRESHOLD,
         "dataset_name": config.DATASET_NAME,
+        "training_mode": config.TRAINING_MODE,
         "validation_size": config.VALIDATION_SIZE,
         "random_state": config.RANDOM_STATE,
         "use_smote": config.USE_SMOTE,
@@ -319,6 +541,7 @@ def run_training(config: CFG) -> dict[str, object]:
 
     report: dict[str, object] = {
         "dataset": config.DATASET_NAME,
+        "training_mode": config.TRAINING_MODE,
         "model": config.MODEL_TYPE,
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
@@ -359,6 +582,7 @@ def run_training(config: CFG) -> dict[str, object]:
         "validation_metrics": validation_metrics,
         "training_validation_metrics_plot": comparison_plot,
         "evaluation_plots": evaluation_plots,
+        "artifact_directory": str(config.OUTPUT_DIR),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in asdict(config).items()
@@ -382,6 +606,14 @@ def parse_args() -> argparse.Namespace:
         description="Train and evaluate a classical ML B-cell epitope classifier."
     )
     parser.add_argument("--dataset", choices=("bcell", "sars"))
+    parser.add_argument(
+        "--training-mode",
+        choices=("same_dataset", "bcell_to_sars"),
+        help=(
+            "Use the existing same-dataset split or train on all B-cell rows "
+            "and evaluate on a stratified SARS holdout."
+        ),
+    )
     parser.add_argument(
         "--model",
         choices=("logistic_regression", "random_forest", "extra_trees", "svm"),
@@ -419,6 +651,8 @@ def main() -> None:
     config = CFG()
     if args.dataset:
         config.DATASET_NAME = args.dataset
+    if args.training_mode:
+        config.TRAINING_MODE = args.training_mode
     if args.model:
         config.MODEL_TYPE = args.model
     if args.peptide_features is not None:

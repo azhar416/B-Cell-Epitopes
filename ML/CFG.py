@@ -11,8 +11,10 @@ class CFG:
 
     DATASET_NAME: str = "bcell"
     DATA_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "dataset")
+    EVALUATION_DATA_DIR: Path | None = None
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
+    TRAINING_MODE: str = "same_dataset"
     USE_PEPTIDE_FEATURES: bool = False
     USE_PROTEIN_FEATURES: bool = False
     USE_BIOLOGICAL_FEATURES: bool = True
@@ -37,6 +39,18 @@ class CFG:
             raise ValueError(
                 "MODEL_TYPE must be logistic_regression, random_forest, "
                 "extra_trees, or svm."
+            )
+        if not isinstance(self.TRAINING_MODE, str):
+            raise ValueError("TRAINING_MODE must be a string.")
+        self.TRAINING_MODE = self.TRAINING_MODE.lower()
+        if self.TRAINING_MODE not in {"same_dataset", "bcell_to_sars"}:
+            raise ValueError(
+                "TRAINING_MODE must be 'same_dataset' or 'bcell_to_sars'."
+            )
+        if self.TRAINING_MODE == "bcell_to_sars" and self.VALIDATION_SIZE != 0.2:
+            raise ValueError(
+                "bcell_to_sars mode evaluates a fixed 20% SARS holdout; "
+                "VALIDATION_SIZE must be 0.2."
             )
         for name in (
             "USE_PEPTIDE_FEATURES",
