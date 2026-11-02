@@ -188,8 +188,10 @@ def run_training(config: CFG) -> dict[str, object]:
     )
     feature_frame = build_feature_frame(
         dataframe,
-        feature_set=config.FEATURE_SET,
+        use_peptide_features=config.USE_PEPTIDE_FEATURES,
         use_protein_features=config.USE_PROTEIN_FEATURES,
+        use_biological_features=config.USE_BIOLOGICAL_FEATURES,
+        peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
     )
     labels = dataframe["target"].to_numpy(dtype=int)
     resampled_metadata = dataframe[
@@ -302,8 +304,10 @@ def run_training(config: CFG) -> dict[str, object]:
     bundle = {
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
-        "feature_set": config.FEATURE_SET,
+        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
+        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
+        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
         "prediction_threshold": config.PREDICTION_THRESHOLD,
         "dataset_name": config.DATASET_NAME,
         "validation_size": config.VALIDATION_SIZE,
@@ -316,8 +320,10 @@ def run_training(config: CFG) -> dict[str, object]:
     report: dict[str, object] = {
         "dataset": config.DATASET_NAME,
         "model": config.MODEL_TYPE,
-        "feature_set": config.FEATURE_SET,
+        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
+        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
+        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
         "split_strategy": (
             "smote_before_stratified_split"
             if config.USE_SMOTE
@@ -380,7 +386,29 @@ def parse_args() -> argparse.Namespace:
         "--model",
         choices=("logistic_regression", "random_forest", "extra_trees", "svm"),
     )
-    parser.add_argument("--features", choices=("aac", "aac_dipeptide"))
+    parser.add_argument(
+        "--peptide-features",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable peptide AAC features.",
+    )
+    parser.add_argument(
+        "--protein-features",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable protein AAC and position features (requires peptide features).",
+    )
+    parser.add_argument(
+        "--biological-features",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable the eight biological descriptors.",
+    )
+    parser.add_argument(
+        "--peptide-feature-type",
+        choices=("aac", "aac_dipeptide"),
+        help="Peptide feature composition when peptide features are enabled.",
+    )
     parser.add_argument("--validation-size", type=float, default=0.2)
     parser.add_argument("--output-dir", type=Path)
     return parser.parse_args()
@@ -393,8 +421,14 @@ def main() -> None:
         config.DATASET_NAME = args.dataset
     if args.model:
         config.MODEL_TYPE = args.model
-    if args.features:
-        config.FEATURE_SET = args.features
+    if args.peptide_features is not None:
+        config.USE_PEPTIDE_FEATURES = args.peptide_features
+    if args.protein_features is not None:
+        config.USE_PROTEIN_FEATURES = args.protein_features
+    if args.biological_features is not None:
+        config.USE_BIOLOGICAL_FEATURES = args.biological_features
+    if args.peptide_feature_type:
+        config.PEPTIDE_FEATURE_TYPE = args.peptide_feature_type
     config.VALIDATION_SIZE = args.validation_size
     if args.output_dir:
         config.OUTPUT_DIR = args.output_dir
