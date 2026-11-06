@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 @dataclass
 class CFG:
-    """Configuration for preprocessing, stratified validation, and training."""
+    """Configuration for preprocessing, protein-group validation, and training."""
 
     DATASET_NAME: str = "bcell"
     DATA_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "dataset")

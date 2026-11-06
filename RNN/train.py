@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import (
     accuracy_score,
@@ -13,7 +14,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
@@ -37,7 +38,7 @@ def set_seed(seed):
 
 
 def make_stratified_split(labels, validation_size=0.2, random_state=42):
-    """Match the label-stratified 80:20 holdout used by the other workflows."""
+    """Create the legacy row-stratified split."""
     labels = np.asarray(labels).reshape(-1)
     if labels.size == 0 or np.unique(labels).size != 2:
         raise ValueError("A stratified split requires binary labels.")
@@ -47,6 +48,68 @@ def make_stratified_split(labels, validation_size=0.2, random_state=42):
         random_state=random_state,
         stratify=labels,
     )
+    return train_indices, validation_indices
+
+
+def make_grouped_split(
+    labels,
+    groups,
+    validation_size=0.2,
+    random_state=42,
+):
+    """Hold out complete proteins while approximating size and class balance."""
+    labels = np.asarray(labels).reshape(-1)
+    groups = np.asarray(groups).reshape(-1)
+    if labels.size == 0 or labels.size != groups.size:
+        raise ValueError("labels and groups must have the same non-zero length.")
+    if np.unique(labels).size != 2:
+        raise ValueError("A grouped split requires examples of both classes.")
+    if not 0 < validation_size < 1:
+        raise ValueError("validation_size must be between 0 and 1.")
+    if pd.isna(groups).any():
+        raise ValueError("Protein groups must not contain missing values.")
+    unique_groups = np.unique(groups)
+    if len(unique_groups) < 2:
+        raise ValueError(
+            "A protein-level holdout requires at least two distinct proteins; "
+            f"found {len(unique_groups)}."
+        )
+
+    overall_positive_rate = float(np.mean(labels))
+    best_split = None
+    best_score = float("inf")
+    splitter = GroupShuffleSplit(
+        n_splits=256,
+        test_size=validation_size,
+        random_state=random_state,
+    )
+    for train_indices, validation_indices in splitter.split(
+        np.zeros(labels.size),
+        labels,
+        groups,
+    ):
+        if (
+            np.unique(labels[train_indices]).size != 2
+            or np.unique(labels[validation_indices]).size != 2
+        ):
+            continue
+        actual_validation_size = len(validation_indices) / labels.size
+        validation_positive_rate = float(np.mean(labels[validation_indices]))
+        score = (
+            abs(actual_validation_size - validation_size) / validation_size
+            + abs(validation_positive_rate - overall_positive_rate)
+        )
+        if score < best_score:
+            best_score = score
+            best_split = train_indices, validation_indices
+    if best_split is None:
+        raise ValueError(
+            "Could not create a protein-level split containing both classes "
+            "in training and validation. More proteins may be required."
+        )
+    train_indices, validation_indices = best_split
+    if np.intersect1d(groups[train_indices], groups[validation_indices]).size:
+        raise RuntimeError("Protein-level split placed a group in both partitions.")
     return train_indices, validation_indices
 
 
@@ -117,11 +180,22 @@ def run_training(config=None):
     )
     dataset = PeptideSequenceDataset(dataframe)
     labels = dataset.labels.numpy().astype(np.int64)
-    train_indices, validation_indices = make_stratified_split(
-        labels,
-        validation_size=config.VALIDATION_SIZE,
-        random_state=config.RANDOM_STATE,
-    )
+    groups = dataframe["parent_protein_id"].to_numpy()
+    if config.DATASET_NAME.lower() == "sars":
+        train_indices, validation_indices = make_stratified_split(
+            labels,
+            validation_size=config.VALIDATION_SIZE,
+            random_state=config.RANDOM_STATE,
+        )
+        split_strategy = "stratified_peptide_holdout"
+    else:
+        train_indices, validation_indices = make_grouped_split(
+            labels,
+            groups,
+            validation_size=config.VALIDATION_SIZE,
+            random_state=config.RANDOM_STATE,
+        )
+        split_strategy = "protein_group_holdout"
     imputer, scaler = scale_tabular_features(dataset, train_indices)
 
     train_subset = Subset(dataset, train_indices.tolist())
@@ -159,11 +233,19 @@ def run_training(config=None):
     best_state = None
     epochs_without_improvement = 0
 
+    split_description = (
+        "peptide-stratified"
+        if split_strategy == "stratified_peptide_holdout"
+        else "protein-group"
+    )
     print(
-        f"RNN split: train={len(train_indices):,} "
-        f"({len(train_indices) / len(dataset):.0%}), "
+        f"RNN {split_description} split: train={len(train_indices):,} "
+        f"({len(train_indices) / len(dataset):.1%}, "
+        f"{np.unique(groups[train_indices]).size:,} proteins), "
         f"validation={len(validation_indices):,} "
-        f"({len(validation_indices) / len(dataset):.0%}); device={device}."
+        f"({len(validation_indices) / len(dataset):.1%}, "
+        f"{np.unique(groups[validation_indices]).size:,} proteins); "
+        f"device={device}."
     )
     for epoch in range(config.EPOCHS):
         model.train()
@@ -269,6 +351,18 @@ def run_training(config=None):
                 "validation_labels": validation_labels.astype(int).tolist(),
                 "validation_probabilities": validation_probabilities.tolist(),
                 "best_epoch": best_epoch,
+                "split_strategy": split_strategy,
+                "train_size": len(train_indices),
+                "validation_size": len(validation_indices),
+                "train_protein_count": int(
+                    np.unique(groups[train_indices]).size
+                ),
+                "validation_protein_count": int(
+                    np.unique(groups[validation_indices]).size
+                ),
+                "train_validation_proteins_overlap": bool(
+                    set(groups[train_indices]) & set(groups[validation_indices])
+                ),
             },
             indent=2,
         ),
@@ -281,6 +375,14 @@ def run_training(config=None):
         "history": history,
         "train_indices": train_indices,
         "validation_indices": validation_indices,
+        "split_strategy": split_strategy,
+        "train_protein_count": int(np.unique(groups[train_indices]).size),
+        "validation_protein_count": int(
+            np.unique(groups[validation_indices]).size
+        ),
+        "train_validation_proteins_overlap": bool(
+            set(groups[train_indices]) & set(groups[validation_indices])
+        ),
         "validation_metrics": validation_metrics,
         "checkpoint_path": str(checkpoint_path),
         "metrics_path": str(metrics_path),

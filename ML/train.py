@@ -1,4 +1,4 @@
-"""Train and evaluate a classical peptide classifier with a stratified holdout."""
+"""Train and evaluate a peptide classifier with a protein-group holdout."""
 
 import argparse
 import json
@@ -24,7 +24,11 @@ from sklearn.metrics import (
 )
 
 from ML.CFG import CFG
-from ML.dataset import load_labeled_dataset, make_stratified_split
+from ML.dataset import (
+    load_labeled_dataset,
+    make_grouped_split,
+    make_stratified_split,
+)
 from ML.model import build_model
 from ML.oversampling import smote_resample
 from ML.pre_dataset import build_feature_frame
@@ -203,6 +207,13 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         data_dir=config.EVALUATION_DATA_DIR or config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
     )
+    bcell_labels = bcell_data["target"].to_numpy(dtype=int)
+    sars_labels = sars_data["target"].to_numpy(dtype=int)
+    sars_train_indices, sars_validation_indices = make_stratified_split(
+        labels=sars_labels,
+        validation_size=config.VALIDATION_SIZE,
+        random_state=config.RANDOM_STATE,
+    )
     bcell_features = _build_configured_features(bcell_data, config)
     sars_features = _build_configured_features(sars_data, config)
     if not bcell_features.columns.equals(sars_features.columns):
@@ -210,19 +221,6 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
             "B-cell and SARS feature columns do not match. "
             "Check that both datasets contain the selected feature inputs."
         )
-
-    bcell_labels = bcell_data["target"].to_numpy(dtype=int)
-    sars_labels = sars_data["target"].to_numpy(dtype=int)
-    _, sars_validation_indices = make_stratified_split(
-        labels=sars_labels,
-        validation_size=config.VALIDATION_SIZE,
-        random_state=config.RANDOM_STATE,
-    )
-    sars_train_indices = np.setdiff1d(
-        np.arange(len(sars_data)),
-        sars_validation_indices,
-        assume_unique=True,
-    )
 
     original_bcell_size = len(bcell_labels)
     fit_features, fit_labels, synthetic_count = smote_resample(
@@ -331,12 +329,26 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
-        "split_strategy": "stratified_sars_holdout",
+        "split_strategy": "stratified_peptide_sars_holdout",
         "train_size": original_bcell_size,
         "validation_size": len(sars_validation_indices),
         "sars_train_unused_size": len(sars_train_indices),
         "train_fraction": 1.0,
         "validation_fraction": len(sars_validation_indices) / len(sars_data),
+        "sars_train_protein_count": int(
+            sars_data.iloc[sars_train_indices]["parent_protein_id"].nunique()
+        ),
+        "sars_validation_protein_count": int(
+            sars_data.iloc[sars_validation_indices]["parent_protein_id"].nunique()
+        ),
+        "sars_train_validation_proteins_overlap": bool(
+            set(sars_data.iloc[sars_train_indices]["parent_protein_id"])
+            & set(sars_data.iloc[sars_validation_indices]["parent_protein_id"])
+        ),
+        "train_protein_count": int(bcell_data["parent_protein_id"].nunique()),
+        "validation_protein_count": int(
+            sars_data.iloc[sars_validation_indices]["parent_protein_id"].nunique()
+        ),
         "n_synthetic_examples": synthetic_count,
         "bcell_class_counts": (
             pd.Series(bcell_labels).value_counts().sort_index().to_dict()
@@ -377,8 +389,9 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
             else {"method": "none"}
         ),
         "validation_metrics_interpretation": (
-            "Metrics use the stratified SARS holdout only. The remaining "
-            "SARS rows were not used for training or evaluation."
+            "Metrics use a stratified peptide-level SARS holdout. The remaining "
+            "SARS rows were not used for fitting, but the same source protein "
+            "may occur in both partitions."
         ),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
@@ -391,7 +404,8 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     print(
         f"Cross-dataset split: train on {original_bcell_size:,} B-cell rows; "
         f"evaluate on {len(sars_validation_indices):,}/{len(sars_data):,} "
-        f"SARS rows ({config.VALIDATION_SIZE:.0%} holdout)."
+        "stratified SARS peptide rows (peptide-level holdout; not a "
+        "protein-level holdout)."
     )
     print(
         f"SARS holdout ROC-AUC={validation_metrics['roc_auc']:.4f}, "
@@ -421,54 +435,51 @@ def run_training(config: CFG) -> dict[str, object]:
         peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
     )
     labels = dataframe["target"].to_numpy(dtype=int)
-    resampled_metadata = dataframe[
-        ["peptide_seq", "target", "parent_protein_id"]
-    ].copy()
+    if config.DATASET_NAME.lower() == "sars":
+        train_indices, validation_indices = make_stratified_split(
+            labels=labels,
+            validation_size=config.VALIDATION_SIZE,
+            random_state=config.RANDOM_STATE,
+        )
+        split_strategy = "stratified_peptide_holdout"
+    else:
+        train_indices, validation_indices = make_grouped_split(
+            labels=labels,
+            groups=dataframe["parent_protein_id"].to_numpy(),
+            validation_size=config.VALIDATION_SIZE,
+            random_state=config.RANDOM_STATE,
+        )
+        split_strategy = "protein_group_holdout"
+    train_features = feature_frame.iloc[train_indices]
+    train_labels = labels[train_indices]
     original_size = len(labels)
-    feature_frame, labels, synthetic_count = smote_resample(
-        feature_frame,
-        labels,
+    fit_features, fit_labels, synthetic_count = smote_resample(
+        train_features,
+        train_labels,
         enabled=config.USE_SMOTE,
         random_state=config.RANDOM_STATE,
         k_neighbors=config.SMOTE_K_NEIGHBORS,
     )
     if config.USE_SMOTE:
-        if synthetic_count:
-            synthetic_metadata = pd.DataFrame(
-                {
-                    "peptide_seq": [""] * synthetic_count,
-                    "target": labels[original_size:],
-                    "parent_protein_id": [pd.NA] * synthetic_count,
-                }
-            )
-            resampled_metadata = pd.concat(
-                [resampled_metadata, synthetic_metadata],
-                ignore_index=True,
-            )
         print(
-            "Pre-split SMOTE enabled: "
-            f"{original_size:,} -> {len(labels):,} examples "
-            f"({synthetic_count:,} synthetic). Validation is resampled and "
-            "must not be interpreted as an unbiased generalization estimate."
+            "Training-only SMOTE enabled: "
+            f"{len(train_labels):,} -> {len(fit_labels):,} training examples "
+            f"({synthetic_count:,} synthetic); validation "
+            "remains untouched."
         )
     else:
-        print("Pre-split SMOTE disabled.")
-    train_indices, validation_indices = make_stratified_split(
-        labels=labels,
-        validation_size=config.VALIDATION_SIZE,
-        random_state=config.RANDOM_STATE,
-    )
+        print("SMOTE disabled.")
     model = build_model(
         model_type=config.MODEL_TYPE,
         random_state=config.RANDOM_STATE,
         random_forest_trees=config.RANDOM_FOREST_TREES,
     )
-    model.fit(feature_frame.iloc[train_indices], labels[train_indices])
+    model.fit(fit_features, fit_labels)
     train_probabilities = model.predict_proba(
-        feature_frame.iloc[train_indices]
+        train_features
     )[:, 1]
     train_metrics = calculate_metrics(
-        labels[train_indices],
+        train_labels,
         train_probabilities,
         threshold=config.PREDICTION_THRESHOLD,
     )
@@ -491,10 +502,20 @@ def run_training(config: CFG) -> dict[str, object]:
         threshold=config.PREDICTION_THRESHOLD,
         output_dir=config.OUTPUT_DIR,
     )
+    split_description = (
+        "Peptide-stratified"
+        if split_strategy == "stratified_peptide_holdout"
+        else "Protein-group"
+    )
     print(
-        f"Train: {len(train_indices):,} ({len(train_indices) / len(labels):.0%}); "
+        f"{split_description} split: train={len(train_indices):,} "
+        f"({len(train_indices) / original_size:.1%}, "
+        f"{dataframe.iloc[train_indices]['parent_protein_id'].nunique():,} "
+        f"proteins); "
         f"validation: {len(validation_indices):,} "
-        f"({len(validation_indices) / len(labels):.0%})"
+        f"({len(validation_indices) / original_size:.1%}, "
+        f"{dataframe.iloc[validation_indices]['parent_protein_id'].nunique():,} "
+        "proteins)"
     )
     print(
         f"Training ROC-AUC={train_metrics['roc_auc']:.4f}, "
@@ -510,18 +531,14 @@ def run_training(config: CFG) -> dict[str, object]:
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         {
-            "peptide_seq": resampled_metadata.iloc[validation_indices][
+            "peptide_seq": dataframe.iloc[validation_indices][
                 "peptide_seq"
-            ].fillna("").to_numpy(),
+            ].to_numpy(),
             "target": labels[validation_indices],
-            "parent_protein_id": resampled_metadata.iloc[validation_indices][
+            "parent_protein_id": dataframe.iloc[validation_indices][
                 "parent_protein_id"
             ].to_numpy(),
-            "is_synthetic": (
-                resampled_metadata.iloc[validation_indices][
-                    "parent_protein_id"
-                ].isna().to_numpy()
-            ),
+            "is_synthetic": False,
             "validation_probability": validation_probabilities,
             "validation_prediction": (
                 validation_probabilities >= config.PREDICTION_THRESHOLD
@@ -553,36 +570,50 @@ def run_training(config: CFG) -> dict[str, object]:
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
-        "split_strategy": (
-            "smote_before_stratified_split"
-            if config.USE_SMOTE
-            else "stratified_by_label"
-        ),
+        "split_strategy": split_strategy,
         "train_size": len(train_indices),
         "validation_size": len(validation_indices),
         "train_fraction": len(train_indices) / len(labels),
         "validation_fraction": len(validation_indices) / len(labels),
+        "train_protein_count": int(
+            dataframe.iloc[train_indices]["parent_protein_id"].nunique()
+        ),
+        "validation_protein_count": int(
+            dataframe.iloc[validation_indices]["parent_protein_id"].nunique()
+        ),
+        "train_validation_proteins_overlap": bool(
+            set(dataframe.iloc[train_indices]["parent_protein_id"])
+            & set(dataframe.iloc[validation_indices]["parent_protein_id"])
+        ),
         "resampling": (
             {
                 "method": "SMOTE",
-                "scope": "before train/validation split",
+                "scope": "training proteins only",
                 "k_neighbors": config.SMOTE_K_NEIGHBORS,
-                "validation_leakage_warning": True,
             }
             if config.USE_SMOTE
             else {"method": "none"}
         ),
         "validation_metrics_interpretation": (
-            "Biased: SMOTE was applied before the train/validation split."
-            if config.USE_SMOTE
-            else "Validation rows were not oversampled."
+            (
+                "Validation is a stratified peptide-level holdout; the same "
+                "source protein may occur in both partitions. SMOTE, when "
+                "enabled, is applied only to training rows."
+                if split_strategy == "stratified_peptide_holdout"
+                else (
+                    "Validation contains only original rows from proteins "
+                    "excluded from training; SMOTE, when enabled, is applied "
+                    "only to training rows."
+                )
+            )
         ),
         "n_examples": len(dataframe),
-        "n_examples_after_resampling": len(labels),
-        "n_synthetic_examples": len(labels) - len(dataframe),
+        "n_examples_after_resampling": len(fit_labels),
+        "n_synthetic_examples": synthetic_count,
         "n_parent_proteins": int(dataframe["parent_protein_id"].nunique()),
         "threshold": config.PREDICTION_THRESHOLD,
-        "train_class_counts": pd.Series(labels[train_indices]).value_counts().sort_index().to_dict(),
+        "train_class_counts": pd.Series(train_labels).value_counts().sort_index().to_dict(),
+        "fit_class_counts": pd.Series(fit_labels).value_counts().sort_index().to_dict(),
         "validation_class_counts": pd.Series(labels[validation_indices]).value_counts().sort_index().to_dict(),
         "training_metrics": train_metrics,
         "validation_metrics": validation_metrics,

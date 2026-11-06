@@ -20,6 +20,7 @@ from TF.CFG import CFG
 from TF.dataset import (
     DIPEPTIDE_COLUMNS,
     DESCRIPTOR_COLUMNS,
+    grouped_split_indices,
     scale_dipeptide_features,
     scale_descriptor_features,
     stratified_split_indices,
@@ -899,7 +900,7 @@ def train_model(
 
 
 def _train_embedding_smote_split(dataset, cfg, device):
-    """SMOTE frozen sequence embeddings before splitting, then train an MLP head."""
+    """Split by dataset protocol, then train on frozen embeddings with SMOTE."""
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
     if cfg.BATCH_SIZE < 1:
@@ -912,11 +913,31 @@ def _train_embedding_smote_split(dataset, cfg, device):
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     labels = dataset.labels.detach().cpu().numpy().astype(np.int64)
-    class_counts = np.bincount(labels, minlength=2)
+    groups = getattr(dataset, "group_ids", None)
+    if groups is None:
+        raise ValueError("Dataset splitting requires dataset.group_ids.")
+    if cfg.DATASET_NAME.lower() == "sars":
+        train_indices, validation_indices = stratified_split_indices(
+            labels,
+            validation_size=cfg.VALIDATION_SIZE,
+            random_state=cfg.SEED,
+        )
+        split_strategy = "stratified_peptide_holdout"
+    else:
+        train_indices, validation_indices = grouped_split_indices(
+            labels,
+            groups,
+            validation_size=cfg.VALIDATION_SIZE,
+            random_state=cfg.SEED,
+        )
+        split_strategy = "protein_group_holdout"
+    train_class_counts = np.bincount(labels[train_indices], minlength=2)
+    class_counts = train_class_counts
     if class_counts.min() <= cfg.SMOTE_K_NEIGHBORS:
         raise ValueError(
             "SMOTE_K_NEIGHBORS must be smaller than the minority-class "
-            f"count ({class_counts.min()})."
+            "count in the training split "
+            f"({class_counts.min()})."
         )
 
     encoder = load_protein_encoder(
@@ -971,7 +992,8 @@ def _train_embedding_smote_split(dataset, cfg, device):
         strategy="median",
         keep_empty_features=True,
     )
-    imputed_descriptors = descriptor_imputer.fit_transform(raw_descriptors)
+    descriptor_imputer.fit(raw_descriptors[train_indices])
+    imputed_descriptors = descriptor_imputer.transform(raw_descriptors)
     feature_blocks = [sequence_embeddings, imputed_descriptors]
     if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False):
         if dataset.dipeptide_features is None:
@@ -983,58 +1005,79 @@ def _train_embedding_smote_split(dataset, cfg, device):
             strategy="median",
             keep_empty_features=True,
         )
-        imputed_dipeptides = dpc_imputer.fit_transform(
-            dataset.dipeptide_features.detach().cpu().numpy()
-        )
+        raw_dipeptides = dataset.dipeptide_features.detach().cpu().numpy()
+        dpc_imputer.fit(raw_dipeptides[train_indices])
+        imputed_dipeptides = dpc_imputer.transform(raw_dipeptides)
         feature_blocks.append(imputed_dipeptides)
     all_features = np.concatenate(
         feature_blocks,
         axis=1,
     )
     feature_scaler = StandardScaler()
-    scaled_features = feature_scaler.fit_transform(all_features).astype(
-        np.float32
-    )
+    feature_scaler.fit(all_features[train_indices])
+    scaled_features = feature_scaler.transform(all_features).astype(np.float32)
     original_size = len(labels)
-    resampled_features, resampled_labels, synthetic_count = smote_resample(
-        scaled_features,
-        labels,
+    fit_features, fit_labels, synthetic_count = smote_resample(
+        scaled_features[train_indices],
+        labels[train_indices],
         enabled=cfg.USE_SMOTE,
         random_state=cfg.SEED,
         k_neighbors=cfg.SMOTE_K_NEIGHBORS,
     )
-    resampled_features = torch.tensor(
-        resampled_features,
+    fit_features = torch.tensor(
+        fit_features,
         dtype=torch.float32,
     )
-    resampled_labels = torch.tensor(
-        resampled_labels,
+    fit_labels = torch.tensor(
+        fit_labels,
         dtype=torch.float32,
     )
-    train_indices, validation_indices = stratified_split_indices(
-        resampled_labels.numpy(),
-        validation_size=cfg.VALIDATION_SIZE,
-        random_state=cfg.SEED,
+    train_features = torch.tensor(
+        scaled_features[train_indices],
+        dtype=torch.float32,
+    )
+    train_labels = torch.tensor(labels[train_indices], dtype=torch.float32)
+    validation_features = torch.tensor(
+        scaled_features[validation_indices],
+        dtype=torch.float32,
+    )
+    validation_labels = torch.tensor(
+        labels[validation_indices],
+        dtype=torch.float32,
+    )
+    split_description = (
+        "Peptide-stratified"
+        if split_strategy == "stratified_peptide_holdout"
+        else "Protein-group"
     )
     print(
-        "Pre-split embedding SMOTE enabled: "
-        f"{original_size:,} -> {len(resampled_labels):,} examples "
-        f"({synthetic_count:,} synthetic). "
-        "Validation is resampled and must not be interpreted as an unbiased "
-        "generalization estimate."
+        f"{split_description} split: train={len(train_indices):,} "
+        f"({len(train_indices) / original_size:.1%}, "
+        f"{np.unique(groups[train_indices]).size:,} proteins), "
+        f"validation={len(validation_indices):,} "
+        f"({len(validation_indices) / original_size:.1%}, "
+        f"{np.unique(groups[validation_indices]).size:,} proteins)."
     )
-    validation_contains_synthetic = bool(
-        np.any(validation_indices >= original_size)
+    if split_strategy == "stratified_peptide_holdout":
+        print("SARS train and validation rows may share the same protein.")
+    print(
+        "Training-only embedding SMOTE: "
+        f"{len(train_indices):,} -> {len(fit_labels):,} training examples "
+        f"({synthetic_count:,} synthetic); validation remains untouched."
     )
     print(
         "Embedding-SMOTE mode trains an MLP on frozen encoder embeddings plus "
         "scaled descriptors; sequence fine-tuning and configured feature-fusion "
-        "layers are not used."
+        "layers are not used. Imputation and scaling are fit on training proteins."
     )
 
     train_dataset = TensorDataset(
-        resampled_features[torch.as_tensor(train_indices, dtype=torch.long)],
-        resampled_labels[torch.as_tensor(train_indices, dtype=torch.long)],
+        fit_features,
+        fit_labels,
+    )
+    train_eval_dataset = TensorDataset(
+        train_features,
+        train_labels,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -1043,13 +1086,16 @@ def _train_embedding_smote_split(dataset, cfg, device):
         num_workers=cfg.NUM_WORKERS,
         pin_memory=device.type == "cuda",
     )
+    train_eval_loader = DataLoader(
+        train_eval_dataset,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=device.type == "cuda",
+    )
     validation_dataset = TensorDataset(
-        resampled_features[
-            torch.as_tensor(validation_indices, dtype=torch.long)
-        ],
-        resampled_labels[
-            torch.as_tensor(validation_indices, dtype=torch.long)
-        ],
+        validation_features,
+        validation_labels,
     )
     validation_loader = DataLoader(
         validation_dataset,
@@ -1058,7 +1104,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
         num_workers=cfg.NUM_WORKERS,
         pin_memory=device.type == "cuda",
     )
-    model = EmbeddingClassifier(resampled_features.shape[1]).to(device)
+    model = EmbeddingClassifier(fit_features.shape[1]).to(device)
     criterion = _build_loss_function(cfg)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -1124,7 +1170,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
             )
             optimizer.step()
 
-        train_metrics, _, _ = evaluate(train_loader)
+        train_metrics, _, _ = evaluate(train_eval_loader)
         validation_metrics, _, _ = evaluate(validation_loader)
         validation_auc = validation_metrics["auc"]
         if not np.isfinite(validation_auc):
@@ -1195,7 +1241,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
             "model_type": "embedding_mlp",
             "classifier_type": "pooled_mlp",
             "encoder_name": cfg.MODEL_NAME,
-            "input_size": int(resampled_features.shape[1]),
+            "input_size": int(fit_features.shape[1]),
             "descriptor_columns": list(DESCRIPTOR_COLUMNS),
             "use_dipeptide_features": getattr(
                 cfg,
@@ -1207,7 +1253,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
                 if getattr(cfg, "USE_DIPEPTIDE_FEATURES", False)
                 else None
             ),
-            "use_smote": True,
+            "use_smote": cfg.USE_SMOTE,
             "smote_k_neighbors": cfg.SMOTE_K_NEIGHBORS,
             "feature_scaler_mean": feature_scaler.mean_,
             "feature_scaler_scale": feature_scaler.scale_,
@@ -1229,24 +1275,41 @@ def _train_embedding_smote_split(dataset, cfg, device):
         "history": history,
         "train_indices": train_indices,
         "validation_indices": validation_indices,
-        "train_class_counts": np.bincount(
-            resampled_labels.numpy()[train_indices].astype(int),
+        "train_class_counts": train_class_counts,
+        "fit_class_counts": np.bincount(
+            fit_labels.numpy().astype(int),
             minlength=2,
         ),
         "validation_class_counts": np.bincount(
-            resampled_labels.numpy()[validation_indices].astype(int),
+            labels[validation_indices].astype(int),
             minlength=2,
         ),
         "validation_metrics": validation_metrics,
         "training_history_plot": history_plot,
         "evaluation_plots": evaluation_plots,
         "feature_fusion": "embedding_concatenation",
-        "training_mode": "pre_split_smote_embedding_mlp",
+        "training_mode": "protein_split_embedding_mlp",
+        "split_strategy": "protein_group_holdout",
         "n_original_examples": original_size,
-        "n_examples_after_smote": len(resampled_labels),
-        "validation_contains_synthetic_examples": validation_contains_synthetic,
+        "n_examples_after_smote": len(fit_labels),
+        "n_synthetic_examples": synthetic_count,
+        "train_protein_count": int(np.unique(groups[train_indices]).size),
+        "validation_protein_count": int(
+            np.unique(groups[validation_indices]).size
+        ),
+        "validation_contains_synthetic_examples": False,
         "validation_metrics_interpretation": (
-            "Biased: SMOTE was applied before the train/validation split."
+            (
+                "Validation is a stratified peptide-level holdout; the same "
+                "source protein may occur in both partitions. Imputation, "
+                "scaling, and SMOTE use only training rows."
+            )
+            if split_strategy == "stratified_peptide_holdout"
+            else (
+                "Validation contains only original rows from proteins "
+                "excluded from training; imputation, scaling, and SMOTE use "
+                "only training rows."
+            )
         ),
         "classifier_type": "pooled_mlp",
         "best_epoch": best_epoch,
@@ -1259,7 +1322,7 @@ def train_validation_split(
     device=None,
     model_factory=None,
 ):
-    """Train once on 80% and evaluate the label-stratified 20% validation set."""
+    """Train and evaluate with a protein split, or peptide split for SARS."""
     cfg = cfg or CFG()
     classifier_type = _validate_classifier_type(cfg)
     if not hasattr(dataset, "labels"):
@@ -1293,11 +1356,24 @@ def train_validation_split(
             device=device,
         )
     labels = dataset.labels.detach().cpu().numpy().reshape(-1)
-    train_indices, validation_indices = stratified_split_indices(
-        labels,
-        validation_size=cfg.VALIDATION_SIZE,
-        random_state=cfg.SEED,
-    )
+    groups = getattr(dataset, "group_ids", None)
+    if groups is None:
+        raise ValueError("Dataset splitting requires dataset.group_ids.")
+    if cfg.DATASET_NAME.lower() == "sars":
+        train_indices, validation_indices = stratified_split_indices(
+            labels,
+            validation_size=cfg.VALIDATION_SIZE,
+            random_state=cfg.SEED,
+        )
+        split_strategy = "stratified_peptide_holdout"
+    else:
+        train_indices, validation_indices = grouped_split_indices(
+            labels,
+            groups,
+            validation_size=cfg.VALIDATION_SIZE,
+            random_state=cfg.SEED,
+        )
+        split_strategy = "protein_group_holdout"
     model_dataset = copy(dataset)
     imputer, scaler = scale_descriptor_features(model_dataset, train_indices)
     feature_preprocessing = {
@@ -1322,12 +1398,21 @@ def train_validation_split(
         feature_preprocessing["dipeptide_scaler_scale"] = dpc_scaler.scale_
     train_subset = Subset(model_dataset, train_indices.tolist())
     validation_subset = Subset(model_dataset, validation_indices.tolist())
-    print(
-        f"Stratified label split: train={len(train_indices):,} "
-        f"({len(train_indices) / len(dataset):.0%}), "
-        f"validation={len(validation_indices):,} "
-        f"({len(validation_indices) / len(dataset):.0%})"
+    split_description = (
+        "Peptide-stratified"
+        if split_strategy == "stratified_peptide_holdout"
+        else "Protein-group"
     )
+    print(
+        f"{split_description} split: train={len(train_indices):,} "
+        f"({len(train_indices) / len(dataset):.1%}, "
+        f"{np.unique(groups[train_indices]).size:,} proteins), "
+        f"validation={len(validation_indices):,} "
+        f"({len(validation_indices) / len(dataset):.1%}, "
+        f"{np.unique(groups[validation_indices]).size:,} proteins)"
+    )
+    if split_strategy == "stratified_peptide_holdout":
+        print("SARS train and validation rows may share the same protein.")
     model, history = train_model(
         train_dataset=train_subset,
         cfg=cfg,
@@ -1371,6 +1456,14 @@ def train_validation_split(
         "history": history,
         "train_indices": train_indices,
         "validation_indices": validation_indices,
+        "split_strategy": split_strategy,
+        "train_protein_count": int(np.unique(groups[train_indices]).size),
+        "validation_protein_count": int(
+            np.unique(groups[validation_indices]).size
+        ),
+        "train_validation_proteins_overlap": bool(
+            set(groups[train_indices]) & set(groups[validation_indices])
+        ),
         "train_class_counts": np.bincount(labels[train_indices].astype(int), minlength=2),
         "validation_class_counts": np.bincount(
             labels[validation_indices].astype(int),

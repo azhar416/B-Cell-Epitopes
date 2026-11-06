@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 from ML.pre_dataset import normalize_sequence
 
@@ -90,7 +90,7 @@ def make_stratified_split(
     validation_size: float = 0.2,
     random_state: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Create one reproducible train/validation split stratified by label only."""
+    """Create the legacy row-level split stratified by label only."""
     labels = np.asarray(labels).reshape(-1)
     if labels.size == 0 or np.unique(labels).size != 2:
         raise ValueError("A stratified split requires non-empty binary labels.")
@@ -114,4 +114,67 @@ def make_stratified_split(
         labels[validation_indices]
     ).size != 2:
         raise ValueError("Both classes must be present in train and validation sets.")
+    return train_indices, validation_indices
+
+
+def make_grouped_split(
+    labels: np.ndarray,
+    groups: np.ndarray,
+    validation_size: float = 0.2,
+    random_state: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split by protein while approximating the requested size and class ratio."""
+    labels = np.asarray(labels).reshape(-1)
+    groups = np.asarray(groups).reshape(-1)
+    if labels.size == 0 or labels.size != groups.size:
+        raise ValueError("labels and groups must have the same non-zero length.")
+    if np.unique(labels).size != 2:
+        raise ValueError("A grouped split requires examples of both classes.")
+    if not 0 < validation_size < 1:
+        raise ValueError("validation_size must be between 0 and 1.")
+    if pd.isna(groups).any():
+        raise ValueError("Protein groups must not contain missing values.")
+    unique_groups = pd.unique(groups)
+    if len(unique_groups) < 2:
+        raise ValueError(
+            "A protein-level holdout requires at least two distinct proteins; "
+            f"found {len(unique_groups)}."
+        )
+
+    overall_positive_rate = float(np.mean(labels))
+    best_split = None
+    best_score = float("inf")
+    splitter = GroupShuffleSplit(
+        n_splits=256,
+        test_size=validation_size,
+        random_state=random_state,
+    )
+    for train_indices, validation_indices in splitter.split(
+        np.zeros(labels.size),
+        labels,
+        groups,
+    ):
+        if (
+            np.unique(labels[train_indices]).size != 2
+            or np.unique(labels[validation_indices]).size != 2
+        ):
+            continue
+        actual_validation_size = len(validation_indices) / labels.size
+        validation_positive_rate = float(np.mean(labels[validation_indices]))
+        score = (
+            abs(actual_validation_size - validation_size) / validation_size
+            + abs(validation_positive_rate - overall_positive_rate)
+        )
+        if score < best_score:
+            best_score = score
+            best_split = train_indices, validation_indices
+
+    if best_split is None:
+        raise ValueError(
+            "Could not create a protein-level split containing both classes "
+            "in training and validation. More proteins may be required."
+        )
+    train_indices, validation_indices = best_split
+    if np.intersect1d(groups[train_indices], groups[validation_indices]).size:
+        raise RuntimeError("Protein-level split placed a group in both partitions.")
     return train_indices, validation_indices
