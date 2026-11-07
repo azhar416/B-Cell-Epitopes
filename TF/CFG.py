@@ -54,9 +54,10 @@ class CFG:
         self.SCHEDULER_FACTOR = 0.5
         self.SCHEDULER_MIN_LR = 1e-7
         self.ENCODER_LEARNING_RATE = 0.0 if self.FREEZE_ENCODER else 2e-5
-        self.LORA_LEARNING_RATE = 1e-4
+        self.LORA_LEARNING_RATE = 5e-6
         self.HEAD_LEARNING_RATE = 1e-4
-        self.WEIGHT_DECAY = 0.01
+        self.WEIGHT_DECAY = 0.1
+        self.LABEL_SMOOTHING = 0.05
         self.LOSS_FUNCTION = "binary_focal"  # "binary_focal" or "bce"
         self.FOCAL_ALPHA = 0.75
         self.FOCAL_GAMMA = 2.0

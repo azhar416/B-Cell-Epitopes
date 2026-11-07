@@ -46,14 +46,17 @@ CLASSIFIER_TYPES = {
 class BinaryFocalLoss(nn.Module):
     """Binary focal loss for probabilities produced by a sigmoid model."""
 
-    def __init__(self, alpha=0.75, gamma=2.0):
+    def __init__(self, alpha=0.75, gamma=2.0, label_smoothing=0.0):
         super().__init__()
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1.")
         if gamma < 0:
             raise ValueError("gamma must be non-negative.")
+        if not 0 <= label_smoothing < 0.5:
+            raise ValueError("label_smoothing must be in the range [0, 0.5).")
         self.alpha = alpha
         self.gamma = gamma
+        self.label_smoothing = label_smoothing
 
     def forward(self, probabilities, targets):
         probabilities = probabilities.reshape(-1).clamp(
@@ -64,12 +67,25 @@ class BinaryFocalLoss(nn.Module):
         if probabilities.shape != targets.shape:
             raise ValueError("Probabilities and targets must have matching shapes.")
 
+        if self.label_smoothing > 0:
+            smoothed_targets = torch.where(
+                targets == 1,
+                1.0 - self.label_smoothing,
+                self.label_smoothing,
+            )
+        else:
+            smoothed_targets = targets
+
         binary_cross_entropy = nn.functional.binary_cross_entropy(
             probabilities,
-            targets,
+            smoothed_targets,
             reduction="none",
         )
-        probability_of_correct_class = torch.exp(-binary_cross_entropy)
+        probability_of_correct_class = torch.where(
+            targets == 1,
+            probabilities,
+            1 - probabilities,
+        )
         alpha_factor = torch.where(
             targets == 1,
             self.alpha,
@@ -79,6 +95,39 @@ class BinaryFocalLoss(nn.Module):
             self.gamma
         ) * binary_cross_entropy
         return loss.mean()
+
+
+class SmoothBCELoss(nn.Module):
+    """Binary cross-entropy loss with optional label smoothing."""
+
+    def __init__(self, label_smoothing=0.0):
+        super().__init__()
+        if not 0 <= label_smoothing < 0.5:
+            raise ValueError("label_smoothing must be in the range [0, 0.5).")
+        self.label_smoothing = label_smoothing
+
+    def forward(self, probabilities, targets):
+        probabilities = probabilities.reshape(-1).clamp(
+            min=torch.finfo(probabilities.dtype).eps,
+            max=1 - torch.finfo(probabilities.dtype).eps,
+        )
+        targets = targets.to(dtype=probabilities.dtype).reshape(-1)
+        if probabilities.shape != targets.shape:
+            raise ValueError("Probabilities and targets must have matching shapes.")
+
+        if self.label_smoothing > 0:
+            smoothed_targets = torch.where(
+                targets == 1,
+                1.0 - self.label_smoothing,
+                self.label_smoothing,
+            )
+        else:
+            smoothed_targets = targets
+
+        return nn.functional.binary_cross_entropy(
+            probabilities,
+            smoothed_targets,
+        )
 
 
 class EmbeddingClassifier(nn.Module):
@@ -103,12 +152,14 @@ class EmbeddingClassifier(nn.Module):
 
 def _build_loss_function(cfg):
     loss_name = cfg.LOSS_FUNCTION.lower()
+    label_smoothing = getattr(cfg, "LABEL_SMOOTHING", 0.0)
     if loss_name == "bce":
-        return nn.BCELoss()
+        return SmoothBCELoss(label_smoothing=label_smoothing)
     if loss_name == "binary_focal":
         return BinaryFocalLoss(
             alpha=cfg.FOCAL_ALPHA,
             gamma=cfg.FOCAL_GAMMA,
+            label_smoothing=label_smoothing,
         )
     raise ValueError(
         "LOSS_FUNCTION must be either 'bce' or 'binary_focal'; "
@@ -496,10 +547,14 @@ def train_model(
     )
     print(f"  Feature fusion: {cfg.FEATURE_FUSION}")
     print(f"  Multi-sample dropout: {msd_status}")
+    print(f"  Loss function: {cfg.LOSS_FUNCTION}")
     if cfg.LOSS_FUNCTION.lower() == "binary_focal":
         print(
             f"    Focal alpha={cfg.FOCAL_ALPHA}, gamma={cfg.FOCAL_GAMMA}"
         )
+    label_smoothing = getattr(cfg, "LABEL_SMOOTHING", 0.0)
+    if label_smoothing > 0:
+        print(f"    Label smoothing: {label_smoothing:g}")
     print(f"  LoRA: {'enabled' if cfg.USE_LORA else 'disabled'}")
     print(
         "  LoRA config: "
@@ -511,9 +566,16 @@ def train_model(
     print(
         "  Learning rates: "
         f"head={cfg.HEAD_LEARNING_RATE:g}, "
-        f"LoRA={cfg.LORA_LEARNING_RATE:g}"
+        f"LoRA={cfg.LORA_LEARNING_RATE:g}, "
+        f"weight_decay={cfg.WEIGHT_DECAY:g}"
         if cfg.USE_LORA
-        else f"  Learning rate: head={cfg.HEAD_LEARNING_RATE:g}"
+        else (
+            f"  Learning rates: head={cfg.HEAD_LEARNING_RATE:g}, "
+            f"encoder={cfg.ENCODER_LEARNING_RATE:g}, "
+            f"weight_decay={cfg.WEIGHT_DECAY:g}"
+            if not cfg.FREEZE_ENCODER
+            else f"  Learning rate: head={cfg.HEAD_LEARNING_RATE:g}, weight_decay={cfg.WEIGHT_DECAY:g}"
+        )
     )
     print(f"  Epochs: {cfg.EPOCHS}")
     if validation_dataset is not None:
@@ -871,6 +933,9 @@ def train_model(
             ),
             "feature_preprocessing": feature_preprocessing,
             "loss_function": cfg.LOSS_FUNCTION,
+            "label_smoothing": getattr(cfg, "LABEL_SMOOTHING", 0.0),
+            "weight_decay": cfg.WEIGHT_DECAY,
+            "lora_learning_rate": cfg.LORA_LEARNING_RATE if cfg.USE_LORA else None,
             "freeze_encoder": cfg.FREEZE_ENCODER,
             "use_lora": cfg.USE_LORA,
             "use_protein_features": getattr(cfg, "USE_PROTEIN_FEATURES", False),
