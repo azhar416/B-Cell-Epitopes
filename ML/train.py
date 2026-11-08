@@ -60,6 +60,148 @@ def calculate_metrics(
     }
 
 
+def _build_configured_model(config: CFG):
+    return build_model(
+        model_type=config.MODEL_TYPE,
+        random_state=config.RANDOM_STATE,
+        random_forest_trees=config.RANDOM_FOREST_TREES,
+        tree_max_depth=config.TREE_MAX_DEPTH,
+        tree_min_samples_leaf=config.TREE_MIN_SAMPLES_LEAF,
+        tree_min_samples_split=config.TREE_MIN_SAMPLES_SPLIT,
+        tree_max_features=config.TREE_MAX_FEATURES,
+        class_weight=config.CLASS_WEIGHT,
+        logistic_regression_c=config.LOGISTIC_REGRESSION_C,
+        logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
+        svm_c=config.SVM_C,
+        svm_gamma=config.SVM_GAMMA,
+    )
+
+
+def _configured_model_parameters(config: CFG) -> dict[str, object]:
+    if config.MODEL_TYPE == "logistic_regression":
+        return {
+            "LOGISTIC_REGRESSION_C": config.LOGISTIC_REGRESSION_C,
+            "LOGISTIC_REGRESSION_MAX_ITER": config.LOGISTIC_REGRESSION_MAX_ITER,
+        }
+    if config.MODEL_TYPE == "svm":
+        return {"SVM_C": config.SVM_C, "SVM_GAMMA": config.SVM_GAMMA}
+    return {
+        "RANDOM_FOREST_TREES": config.RANDOM_FOREST_TREES,
+        "TREE_MAX_DEPTH": config.TREE_MAX_DEPTH,
+        "TREE_MIN_SAMPLES_LEAF": config.TREE_MIN_SAMPLES_LEAF,
+        "TREE_MIN_SAMPLES_SPLIT": config.TREE_MIN_SAMPLES_SPLIT,
+        "TREE_MAX_FEATURES": config.TREE_MAX_FEATURES,
+    }
+
+
+def _fit_and_score_candidates(
+    config: CFG,
+    fit_features: pd.DataFrame,
+    fit_labels: np.ndarray,
+    train_features: pd.DataFrame,
+    train_labels: np.ndarray,
+    validation_features: pd.DataFrame,
+    validation_labels: np.ndarray,
+) -> tuple[
+    object,
+    np.ndarray,
+    np.ndarray,
+    dict[str, float | int],
+    dict[str, float | int],
+    list[dict[str, object]],
+    dict[str, object],
+]:
+    """Fit configured hyperparameter candidates and select by validation score."""
+    base_parameters = _configured_model_parameters(config)
+    candidate_overrides = (
+        config.HYPERPARAMETER_TUNING_CANDIDATES[config.MODEL_TYPE]
+        if config.HYPERPARAMETER_TUNING
+        else []
+    )
+    parameter_sets = [base_parameters]
+    parameter_sets.extend(
+        {**base_parameters, **overrides}
+        for overrides in candidate_overrides
+    )
+    candidate_results = []
+    for candidate_index, parameters in enumerate(parameter_sets):
+        candidate_config = copy.copy(config)
+        for name, value in parameters.items():
+            setattr(candidate_config, name, value)
+        candidate_config.HYPERPARAMETER_TUNING = False
+        candidate_config.validate()
+
+        model = _build_configured_model(candidate_config)
+        model.fit(fit_features, fit_labels)
+        train_probabilities = model.predict_proba(train_features)[:, 1]
+        validation_probabilities = model.predict_proba(validation_features)[:, 1]
+        train_metrics = calculate_metrics(
+            train_labels,
+            train_probabilities,
+            threshold=config.PREDICTION_THRESHOLD,
+        )
+        validation_metrics = calculate_metrics(
+            validation_labels,
+            validation_probabilities,
+            threshold=config.PREDICTION_THRESHOLD,
+        )
+        score = float(
+            validation_metrics[config.HYPERPARAMETER_TUNING_METRIC]
+        )
+        if not np.isfinite(score):
+            raise ValueError(
+                "Hyperparameter tuning produced a non-finite validation "
+                f"{config.HYPERPARAMETER_TUNING_METRIC} for candidate "
+                f"{candidate_index}."
+            )
+        candidate_results.append(
+            {
+                "candidate_index": candidate_index,
+                "model": model,
+                "train_probabilities": train_probabilities,
+                "validation_probabilities": validation_probabilities,
+                "training_metrics": train_metrics,
+                "validation_metrics": validation_metrics,
+                "hyperparameters": parameters,
+                "selection_score": score,
+            }
+        )
+
+    best_candidate = max(
+        candidate_results,
+        key=lambda result: result["selection_score"],
+    )
+    comparison = []
+    for result in candidate_results:
+        comparison.append(
+            {
+                "candidate_index": result["candidate_index"],
+                "hyperparameters": result["hyperparameters"],
+                "selection_metric": config.HYPERPARAMETER_TUNING_METRIC,
+                "selection_score": result["selection_score"],
+                "selected": result is best_candidate,
+                **{
+                    f"validation_{name}": value
+                    for name, value in result["validation_metrics"].items()
+                },
+                **{
+                    f"training_{name}": value
+                    for name, value in result["training_metrics"].items()
+                },
+            }
+        )
+
+    return (
+        best_candidate["model"],
+        best_candidate["train_probabilities"],
+        best_candidate["validation_probabilities"],
+        best_candidate["training_metrics"],
+        best_candidate["validation_metrics"],
+        comparison if config.HYPERPARAMETER_TUNING else [],
+        best_candidate["hyperparameters"],
+    )
+
+
 def save_evaluation_plots(
     labels: np.ndarray,
     probabilities: np.ndarray,
@@ -254,36 +396,25 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     else:
         print("Cross-dataset mode: SMOTE disabled.")
 
-    model = build_model(
-        model_type=config.MODEL_TYPE,
-        random_state=config.RANDOM_STATE,
-        random_forest_trees=config.RANDOM_FOREST_TREES,
-        tree_max_depth=config.TREE_MAX_DEPTH,
-        tree_min_samples_leaf=config.TREE_MIN_SAMPLES_LEAF,
-        tree_min_samples_split=config.TREE_MIN_SAMPLES_SPLIT,
-        tree_max_features=config.TREE_MAX_FEATURES,
-        class_weight=config.CLASS_WEIGHT,
-        logistic_regression_c=config.LOGISTIC_REGRESSION_C,
-        logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
-        svm_c=config.SVM_C,
-        svm_gamma=config.SVM_GAMMA,
-    )
-    model.fit(fit_features, fit_labels)
-
-    train_probabilities = model.predict_proba(bcell_features)[:, 1]
-    train_metrics = calculate_metrics(
-        bcell_labels,
+    (
+        model,
         train_probabilities,
-        threshold=config.PREDICTION_THRESHOLD,
+        validation_probabilities,
+        train_metrics,
+        validation_metrics,
+        hyperparameter_comparison,
+        selected_hyperparameters,
+    ) = _fit_and_score_candidates(
+        config=config,
+        fit_features=fit_features,
+        fit_labels=fit_labels,
+        train_features=bcell_features,
+        train_labels=bcell_labels,
+        validation_features=sars_features.iloc[sars_validation_indices],
+        validation_labels=sars_labels[sars_validation_indices],
     )
     validation_features = sars_features.iloc[sars_validation_indices]
     validation_labels = sars_labels[sars_validation_indices]
-    validation_probabilities = model.predict_proba(validation_features)[:, 1]
-    validation_metrics = calculate_metrics(
-        validation_labels,
-        validation_probabilities,
-        threshold=config.PREDICTION_THRESHOLD,
-    )
 
     output_dir = (
         config.OUTPUT_DIR
@@ -320,6 +451,12 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
             ).astype(int),
         }
     ).to_csv(output_dir / "validation_predictions.csv", index=False)
+    if hyperparameter_comparison:
+        pd.DataFrame(hyperparameter_comparison).assign(
+            hyperparameters=lambda frame: frame["hyperparameters"].map(
+                json.dumps
+            )
+        ).to_csv(output_dir / "hyperparameter_comparison.csv", index=False)
 
     sars_sequences = set(sars_data["peptide_seq"])
     bcell_sequences = set(bcell_data["peptide_seq"])
@@ -346,6 +483,8 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "random_state": config.RANDOM_STATE,
         "use_smote": config.USE_SMOTE,
         "smote_k_neighbors": config.SMOTE_K_NEIGHBORS,
+        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
+        "selected_hyperparameters": selected_hyperparameters,
     }
     dump(bundle, output_dir / "peptide_classifier.joblib")
 
@@ -409,6 +548,19 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "threshold": config.PREDICTION_THRESHOLD,
         "training_metrics": train_metrics,
         "validation_metrics": validation_metrics,
+        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
+        "hyperparameter_tuning_metric": (
+            config.HYPERPARAMETER_TUNING_METRIC
+            if config.HYPERPARAMETER_TUNING
+            else None
+        ),
+        "selected_hyperparameters": selected_hyperparameters,
+        "hyperparameter_comparison": hyperparameter_comparison,
+        "hyperparameter_comparison_path": (
+            str(output_dir / "hyperparameter_comparison.csv")
+            if hyperparameter_comparison
+            else None
+        ),
         "training_validation_metrics_plot": comparison_plot,
         "evaluation_plots": evaluation_plots,
         "validation_predictions": str(output_dir / "validation_predictions.csv"),
@@ -517,36 +669,22 @@ def _run_training_single(
         )
     else:
         print("SMOTE disabled.")
-    model = build_model(
-        model_type=config.MODEL_TYPE,
-        random_state=config.RANDOM_STATE,
-        random_forest_trees=config.RANDOM_FOREST_TREES,
-        tree_max_depth=config.TREE_MAX_DEPTH,
-        tree_min_samples_leaf=config.TREE_MIN_SAMPLES_LEAF,
-        tree_min_samples_split=config.TREE_MIN_SAMPLES_SPLIT,
-        tree_max_features=config.TREE_MAX_FEATURES,
-        class_weight=config.CLASS_WEIGHT,
-        logistic_regression_c=config.LOGISTIC_REGRESSION_C,
-        logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
-        svm_c=config.SVM_C,
-        svm_gamma=config.SVM_GAMMA,
-    )
-    model.fit(fit_features, fit_labels)
-    train_probabilities = model.predict_proba(
-        train_features
-    )[:, 1]
-    train_metrics = calculate_metrics(
-        train_labels,
+    (
+        model,
         train_probabilities,
-        threshold=config.PREDICTION_THRESHOLD,
-    )
-    validation_probabilities = model.predict_proba(
-        feature_frame.iloc[validation_indices]
-    )[:, 1]
-    validation_metrics = calculate_metrics(
-        labels[validation_indices],
         validation_probabilities,
-        threshold=config.PREDICTION_THRESHOLD,
+        train_metrics,
+        validation_metrics,
+        hyperparameter_comparison,
+        selected_hyperparameters,
+    ) = _fit_and_score_candidates(
+        config=config,
+        fit_features=fit_features,
+        fit_labels=fit_labels,
+        train_features=train_features,
+        train_labels=train_labels,
+        validation_features=feature_frame.iloc[validation_indices],
+        validation_labels=labels[validation_indices],
     )
     comparison_plot = save_train_validation_metrics_plot(
         train_metrics,
@@ -616,6 +754,15 @@ def _run_training_single(
             ).astype(int),
         }
     ).to_csv(config.OUTPUT_DIR / "validation_predictions.csv", index=False)
+    if hyperparameter_comparison:
+        comparison_frame = pd.DataFrame(hyperparameter_comparison)
+        comparison_frame["hyperparameters"] = comparison_frame[
+            "hyperparameters"
+        ].map(json.dumps)
+        comparison_frame.to_csv(
+            config.OUTPUT_DIR / "hyperparameter_comparison.csv",
+            index=False,
+        )
     bundle = {
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
@@ -630,6 +777,8 @@ def _run_training_single(
         "random_state": config.RANDOM_STATE,
         "use_smote": config.USE_SMOTE,
         "smote_k_neighbors": config.SMOTE_K_NEIGHBORS,
+        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
+        "selected_hyperparameters": selected_hyperparameters,
     }
     dump(bundle, config.OUTPUT_DIR / "peptide_classifier.joblib")
 
@@ -688,8 +837,24 @@ def _run_training_single(
         "validation_class_counts": pd.Series(labels[validation_indices]).value_counts().sort_index().to_dict(),
         "training_metrics": train_metrics,
         "validation_metrics": validation_metrics,
+        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
+        "hyperparameter_tuning_metric": (
+            config.HYPERPARAMETER_TUNING_METRIC
+            if config.HYPERPARAMETER_TUNING
+            else None
+        ),
+        "selected_hyperparameters": selected_hyperparameters,
+        "hyperparameter_comparison": hyperparameter_comparison,
+        "hyperparameter_comparison_path": (
+            str(config.OUTPUT_DIR / "hyperparameter_comparison.csv")
+            if hyperparameter_comparison
+            else None
+        ),
         "training_validation_metrics_plot": comparison_plot,
         "evaluation_plots": evaluation_plots,
+        "validation_predictions": str(
+            config.OUTPUT_DIR / "validation_predictions.csv"
+        ),
         "artifact_directory": str(config.OUTPUT_DIR),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
@@ -763,6 +928,7 @@ def run_training(config: CFG) -> dict[str, object]:
         fold_reports.append(fold_report)
 
     prediction_frames = []
+    hyperparameter_comparison_rows = []
     for fold_number, fold_report in enumerate(fold_reports, 1):
         prediction_path = Path(fold_report["validation_predictions"])
         fold_predictions = pd.read_csv(prediction_path)
@@ -776,11 +942,25 @@ def run_training(config: CFG) -> dict[str, object]:
             probability_column
         ]
         prediction_frames.append(fold_predictions)
+        for candidate in fold_report.get("hyperparameter_comparison", []):
+            hyperparameter_comparison_rows.append(
+                {"fold": fold_number, **candidate}
+            )
 
     out_of_fold_predictions = pd.concat(prediction_frames, ignore_index=True)
     summary_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = summary_dir / "out_of_fold_predictions.csv"
     out_of_fold_predictions.to_csv(predictions_path, index=False)
+    hyperparameter_comparison_path = None
+    if config.HYPERPARAMETER_TUNING:
+        hyperparameter_comparison_path = (
+            summary_dir / "hyperparameter_comparison.csv"
+        )
+        comparison_frame = pd.DataFrame(hyperparameter_comparison_rows)
+        comparison_frame["hyperparameters"] = comparison_frame[
+            "hyperparameters"
+        ].map(json.dumps)
+        comparison_frame.to_csv(hyperparameter_comparison_path, index=False)
     pooled_metrics = calculate_metrics(
         out_of_fold_predictions["target"].to_numpy(dtype=int),
         out_of_fold_predictions["validation_probability"].to_numpy(dtype=float),
@@ -825,6 +1005,12 @@ def run_training(config: CFG) -> dict[str, object]:
                 "validation_size": fold_report["validation_size"],
                 "training_metrics": fold_report["training_metrics"],
                 "validation_metrics": fold_report["validation_metrics"],
+                "selected_hyperparameters": fold_report[
+                    "selected_hyperparameters"
+                ],
+                "hyperparameter_comparison": fold_report[
+                    "hyperparameter_comparison"
+                ],
                 "artifact_directory": fold_report["artifact_directory"],
             }
             for fold_number, fold_report in enumerate(fold_reports, 1)
@@ -835,6 +1021,25 @@ def run_training(config: CFG) -> dict[str, object]:
         "std_validation_metrics": std_validation_metrics,
         "training_metrics": mean_training_metrics,
         "validation_metrics": pooled_metrics,
+        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
+        "hyperparameter_tuning_metric": (
+            config.HYPERPARAMETER_TUNING_METRIC
+            if config.HYPERPARAMETER_TUNING
+            else None
+        ),
+        "hyperparameter_comparison": hyperparameter_comparison_rows,
+        "hyperparameter_comparison_path": (
+            str(hyperparameter_comparison_path)
+            if hyperparameter_comparison_path is not None
+            else None
+        ),
+        "hyperparameter_tuning_warning": (
+            "Hyperparameters were selected using the same validation fold "
+            "reported for evaluation. Fold metrics and pooled out-of-fold "
+            "metrics may therefore be optimistic."
+            if config.HYPERPARAMETER_TUNING
+            else None
+        ),
         "out_of_fold_predictions": str(predictions_path),
         "artifact_directory": str(summary_dir),
         "fold_reports": fold_reports,

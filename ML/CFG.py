@@ -40,6 +40,37 @@ class CFG:
     LOGISTIC_REGRESSION_MAX_ITER: int = 2000
     SVM_C: float = 1.0
     SVM_GAMMA: str | float = "scale"
+    HYPERPARAMETER_TUNING: bool = False
+    HYPERPARAMETER_TUNING_METRIC: str = "roc_auc"
+    HYPERPARAMETER_TUNING_CANDIDATES: dict[str, list[dict[str, object]]] = field(
+        default_factory=lambda: {
+            "logistic_regression": [
+                {"LOGISTIC_REGRESSION_C": 0.1},
+                {"LOGISTIC_REGRESSION_C": 10.0},
+            ],
+            "svm": [
+                {"SVM_C": 0.1},
+                {"SVM_C": 10.0},
+                {"SVM_GAMMA": "auto"},
+            ],
+            "random_forest": [
+                {"TREE_MAX_DEPTH": 8, "TREE_MIN_SAMPLES_LEAF": 2},
+                {"TREE_MAX_DEPTH": 12, "TREE_MIN_SAMPLES_LEAF": 2},
+                {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 5},
+                {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 10},
+                {"RANDOM_FOREST_TREES": 500},
+                {"TREE_MAX_FEATURES": "log2"},
+            ],
+            "extra_trees": [
+                {"TREE_MAX_DEPTH": 8, "TREE_MIN_SAMPLES_LEAF": 2},
+                {"TREE_MAX_DEPTH": 12, "TREE_MIN_SAMPLES_LEAF": 2},
+                {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 5},
+                {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 10},
+                {"RANDOM_FOREST_TREES": 500},
+                {"TREE_MAX_FEATURES": "log2"},
+            ],
+        }
+    )
 
     def validate(self) -> None:
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
@@ -54,6 +85,7 @@ class CFG:
                 "MODEL_TYPE must be logistic_regression, random_forest, "
                 "extra_trees, or svm."
             )
+        self.MODEL_TYPE = self.MODEL_TYPE.lower()
         if not isinstance(self.TRAINING_MODE, str):
             raise ValueError("TRAINING_MODE must be a string.")
         self.TRAINING_MODE = self.TRAINING_MODE.lower()
@@ -158,3 +190,64 @@ class CFG:
             raise ValueError("SVM_GAMMA must be 'scale', 'auto', or a positive number.")
         if isinstance(self.SVM_GAMMA, (float, int)) and self.SVM_GAMMA <= 0:
             raise ValueError("Numeric SVM_GAMMA must be positive.")
+        if not isinstance(self.HYPERPARAMETER_TUNING, bool):
+            raise ValueError("HYPERPARAMETER_TUNING must be a boolean.")
+        if (
+            not isinstance(self.HYPERPARAMETER_TUNING_METRIC, str)
+            or self.HYPERPARAMETER_TUNING_METRIC
+            not in {"roc_auc", "pr_auc", "f1", "mcc"}
+        ):
+            raise ValueError(
+                "HYPERPARAMETER_TUNING_METRIC must be roc_auc, pr_auc, f1, or mcc."
+            )
+        if not isinstance(self.HYPERPARAMETER_TUNING_CANDIDATES, dict):
+            raise ValueError("HYPERPARAMETER_TUNING_CANDIDATES must be a mapping.")
+        model_parameters = {
+            "logistic_regression": {
+                "LOGISTIC_REGRESSION_C",
+                "LOGISTIC_REGRESSION_MAX_ITER",
+            },
+            "svm": {"SVM_C", "SVM_GAMMA"},
+            "random_forest": {
+                "RANDOM_FOREST_TREES",
+                "TREE_MAX_DEPTH",
+                "TREE_MIN_SAMPLES_LEAF",
+                "TREE_MIN_SAMPLES_SPLIT",
+                "TREE_MAX_FEATURES",
+            },
+            "extra_trees": {
+                "RANDOM_FOREST_TREES",
+                "TREE_MAX_DEPTH",
+                "TREE_MIN_SAMPLES_LEAF",
+                "TREE_MIN_SAMPLES_SPLIT",
+                "TREE_MAX_FEATURES",
+            },
+        }
+        for model_type, candidates in self.HYPERPARAMETER_TUNING_CANDIDATES.items():
+            if model_type not in model_parameters:
+                raise ValueError(
+                    "Tuning candidates contain unsupported model type "
+                    f"{model_type!r}."
+                )
+            if not isinstance(candidates, list) or not all(
+                isinstance(candidate, dict) and candidate
+                for candidate in candidates
+            ):
+                raise ValueError(
+                    f"Tuning candidates for {model_type!r} must be a list of "
+                    "non-empty parameter mappings."
+                )
+            for candidate in candidates:
+                unknown_parameters = set(candidate) - model_parameters[model_type]
+                if unknown_parameters:
+                    raise ValueError(
+                        f"Unsupported {model_type} tuning parameters: "
+                        f"{sorted(unknown_parameters)}."
+                    )
+        if self.HYPERPARAMETER_TUNING and not self.HYPERPARAMETER_TUNING_CANDIDATES.get(
+            self.MODEL_TYPE.lower()
+        ):
+            raise ValueError(
+                "Hyperparameter tuning is enabled, but there are no candidates "
+                f"for MODEL_TYPE={self.MODEL_TYPE!r}."
+            )
