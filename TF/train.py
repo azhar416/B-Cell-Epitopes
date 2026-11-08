@@ -218,6 +218,10 @@ def _build_model(cfg):
         classifier_dropout=getattr(cfg, "CLASSIFIER_DROPOUT", 0.5),
         num_features=len(DESCRIPTOR_COLUMNS),
         cross_attention_heads=getattr(cfg, "CROSS_ATTENTION_HEADS", 8),
+        cross_attention_dropout=getattr(cfg, "CROSS_ATTENTION_DROPOUT", 0.1),
+        feature_fusion_dropout=getattr(cfg, "FEATURE_FUSION_DROPOUT", 0.1),
+        late_fusion_dropout=getattr(cfg, "LATE_FUSION_DROPOUT", 0.5),
+        low_rank_bilinear_dim=getattr(cfg, "LOW_RANK_BILINEAR_DIM", 32),
         use_dipeptide_features=getattr(
             cfg,
             "USE_DIPEPTIDE_FEATURES",
@@ -311,11 +315,15 @@ def _binary_metrics(targets, probabilities, threshold):
     return {
         "auc": float(auc),
         "pr_auc": pr_auc,
+        "accuracy": accuracy,
         "recall": recall,
         "precision": precision,
-        "accuracy": accuracy,
-        "balanced_accuracy": (recall + specificity) / 2,
         "f1": f1,
+        "tn": true_negative,
+        "fp": false_positive,
+        "fn": false_negative,
+        "tp": true_positive,
+        "balanced_accuracy": (recall + specificity) / 2,
         "mcc": float(mcc),
         "confusion_matrix": [
             [true_negative, false_positive],
@@ -444,8 +452,10 @@ def _save_training_history_plot(history, output_dir):
         ("ROC-AUC", "auc"),
         ("PR-AUC", "pr_auc"),
         ("Accuracy", "accuracy"),
-        ("Balanced accuracy", "balanced_accuracy"),
+        ("Recall", "recall"),
+        ("Precision", "precision"),
         ("F1", "f1"),
+        ("Balanced accuracy", "balanced_accuracy"),
         ("MCC", "mcc"),
     )
     for label, metric in metric_specs:
@@ -517,11 +527,31 @@ def train_model(
         "cross_attention",
         "se",
         "gmu",
+        "film",
+        "late_fusion",
+        "low_rank_bilinear",
+        "gated_residual",
     }:
         raise ValueError(
             "FEATURE_FUSION must be sequence_only, weighted_concat, "
-            "cross_attention, se, or gmu."
+            "cross_attention, se, gmu, film, late_fusion, "
+            "low_rank_bilinear, or gated_residual."
         )
+    low_rank_bilinear_dim = getattr(cfg, "LOW_RANK_BILINEAR_DIM", 32)
+    if (
+        not isinstance(low_rank_bilinear_dim, int)
+        or isinstance(low_rank_bilinear_dim, bool)
+        or low_rank_bilinear_dim < 1
+    ):
+        raise ValueError("LOW_RANK_BILINEAR_DIM must be a positive integer.")
+    for name, default in (
+        ("CROSS_ATTENTION_DROPOUT", 0.1),
+        ("FEATURE_FUSION_DROPOUT", 0.1),
+        ("LATE_FUSION_DROPOUT", 0.5),
+    ):
+        dropout = getattr(cfg, name, default)
+        if not isinstance(dropout, (int, float)) or not 0 <= dropout < 1:
+            raise ValueError(f"{name} must be in [0, 1).")
     if not isinstance(cfg.MSD_SAMPLES, int) or cfg.MSD_SAMPLES < 1:
         raise ValueError("MSD_SAMPLES must be a positive integer.")
     if cfg.MSD_ENABLED and cfg.MSD_SAMPLES < 2:
@@ -812,11 +842,15 @@ def train_model(
             "training_optimization_loss": epoch_loss,
             "train_auc": training_metrics["auc"],
             "train_pr_auc": training_metrics["pr_auc"],
+            "train_accuracy": training_metrics["accuracy"],
             "train_recall": training_metrics["recall"],
             "train_precision": training_metrics["precision"],
-            "train_accuracy": training_metrics["accuracy"],
-            "train_balanced_accuracy": training_metrics["balanced_accuracy"],
             "train_f1": training_metrics["f1"],
+            "train_tn": training_metrics["tn"],
+            "train_fp": training_metrics["fp"],
+            "train_fn": training_metrics["fn"],
+            "train_tp": training_metrics["tp"],
+            "train_balanced_accuracy": training_metrics["balanced_accuracy"],
             "train_mcc": training_metrics["mcc"],
         }
         validation_metrics = None
@@ -835,11 +869,15 @@ def train_model(
                         "loss",
                         "auc",
                         "pr_auc",
+                        "accuracy",
                         "recall",
                         "precision",
-                        "accuracy",
-                        "balanced_accuracy",
                         "f1",
+                        "tn",
+                        "fp",
+                        "fn",
+                        "tp",
+                        "balanced_accuracy",
                         "mcc",
                     )
                 }
@@ -880,9 +918,18 @@ def train_model(
             f"{fold_label}Epoch {epoch + 1}/{cfg.EPOCHS} - "
             f"train_loss: {training_metrics['loss']:.4f}, "
             f"train_auc: {training_metrics['auc']:.4f}, "
+            f"train_pr_auc: {training_metrics['pr_auc']:.4f}, "
+            f"train_accuracy: {training_metrics['accuracy']:.4f}, "
             f"train_recall: {training_metrics['recall']:.4f}, "
             f"train_precision: {training_metrics['precision']:.4f}, "
-            f"train_accuracy: {training_metrics['accuracy']:.4f}"
+            f"train_f1: {training_metrics['f1']:.4f}, "
+            f"train_tn: {training_metrics['tn']}, "
+            f"train_fp: {training_metrics['fp']}, "
+            f"train_fn: {training_metrics['fn']}, "
+            f"train_tp: {training_metrics['tp']}, "
+            f"train_balanced_accuracy: "
+            f"{training_metrics['balanced_accuracy']:.4f}, "
+            f"train_mcc: {training_metrics['mcc']:.4f}"
             + (
                 ""
                 if validation_metrics is None
@@ -890,9 +937,18 @@ def train_model(
                     f", validation_loss: {validation_metrics['loss']:.4f}, "
                     f"validation_auc: {validation_metrics['auc']:.4f}, "
                     f"validation_pr_auc: {validation_metrics['pr_auc']:.4f}, "
+                    f"validation_accuracy: "
+                    f"{validation_metrics['accuracy']:.4f}, "
                     f"validation_recall: {validation_metrics['recall']:.4f}, "
                     f"validation_precision: {validation_metrics['precision']:.4f}, "
-                    f"validation_accuracy: {validation_metrics['accuracy']:.4f}"
+                    f"validation_f1: {validation_metrics['f1']:.4f}, "
+                    f"validation_tn: {validation_metrics['tn']}, "
+                    f"validation_fp: {validation_metrics['fp']}, "
+                    f"validation_fn: {validation_metrics['fn']}, "
+                    f"validation_tp: {validation_metrics['tp']}, "
+                    f"validation_balanced_accuracy: "
+                    f"{validation_metrics['balanced_accuracy']:.4f}, "
+                    f"validation_mcc: {validation_metrics['mcc']:.4f}"
                 )
             )
         )
@@ -920,6 +976,23 @@ def train_model(
             "model_name": cfg.MODEL_NAME,
             "model_type": cfg.MODEL_TYPE,
             "feature_fusion": cfg.FEATURE_FUSION,
+            "cross_attention_heads": getattr(cfg, "CROSS_ATTENTION_HEADS", 8),
+            "cross_attention_dropout": getattr(
+                cfg,
+                "CROSS_ATTENTION_DROPOUT",
+                0.1,
+            ),
+            "feature_fusion_dropout": getattr(
+                cfg,
+                "FEATURE_FUSION_DROPOUT",
+                0.1,
+            ),
+            "late_fusion_dropout": getattr(cfg, "LATE_FUSION_DROPOUT", 0.5),
+            "low_rank_bilinear_dim": getattr(
+                cfg,
+                "LOW_RANK_BILINEAR_DIM",
+                32,
+            ),
             "classifier_type": cfg.CLASSIFIER_TYPE,
             "cnn_channels": getattr(model, "cnn_channels", None),
             "cnn_channels_setting": getattr(cfg, "CNN_CHANNELS", 128),
@@ -1263,11 +1336,15 @@ def _train_embedding_smote_split(
             "train_loss": train_metrics["loss"],
             "train_auc": train_metrics["auc"],
             "train_pr_auc": train_metrics["pr_auc"],
+            "train_accuracy": train_metrics["accuracy"],
             "train_recall": train_metrics["recall"],
             "train_precision": train_metrics["precision"],
-            "train_accuracy": train_metrics["accuracy"],
-            "train_balanced_accuracy": train_metrics["balanced_accuracy"],
             "train_f1": train_metrics["f1"],
+            "train_tn": train_metrics["tn"],
+            "train_fp": train_metrics["fp"],
+            "train_fn": train_metrics["fn"],
+            "train_tp": train_metrics["tp"],
+            "train_balanced_accuracy": train_metrics["balanced_accuracy"],
             "train_mcc": train_metrics["mcc"],
             **{
                 f"validation_{key}": value
@@ -1282,8 +1359,32 @@ def _train_embedding_smote_split(
             f"Embedding MLP epoch {epoch + 1}/{cfg.EPOCHS} - "
             f"train_loss: {train_metrics['loss']:.4f}, "
             f"train_auc: {train_metrics['auc']:.4f}, "
+            f"train_pr_auc: {train_metrics['pr_auc']:.4f}, "
+            f"train_accuracy: {train_metrics['accuracy']:.4f}, "
+            f"train_recall: {train_metrics['recall']:.4f}, "
+            f"train_precision: {train_metrics['precision']:.4f}, "
+            f"train_f1: {train_metrics['f1']:.4f}, "
+            f"train_tn: {train_metrics['tn']}, "
+            f"train_fp: {train_metrics['fp']}, "
+            f"train_fn: {train_metrics['fn']}, "
+            f"train_tp: {train_metrics['tp']}, "
+            f"train_balanced_accuracy: "
+            f"{train_metrics['balanced_accuracy']:.4f}, "
+            f"train_mcc: {train_metrics['mcc']:.4f}, "
             f"validation_loss: {validation_metrics['loss']:.4f}, "
-            f"validation_auc: {validation_auc:.4f}"
+            f"validation_auc: {validation_auc:.4f}, "
+            f"validation_pr_auc: {validation_metrics['pr_auc']:.4f}, "
+            f"validation_accuracy: {validation_metrics['accuracy']:.4f}, "
+            f"validation_recall: {validation_metrics['recall']:.4f}, "
+            f"validation_precision: {validation_metrics['precision']:.4f}, "
+            f"validation_f1: {validation_metrics['f1']:.4f}, "
+            f"validation_tn: {validation_metrics['tn']}, "
+            f"validation_fp: {validation_metrics['fp']}, "
+            f"validation_fn: {validation_metrics['fn']}, "
+            f"validation_tp: {validation_metrics['tp']}, "
+            f"validation_balanced_accuracy: "
+            f"{validation_metrics['balanced_accuracy']:.4f}, "
+            f"validation_mcc: {validation_metrics['mcc']:.4f}"
         )
         if validation_auc > (
             best_validation_auc + cfg.EARLY_STOPPING_MIN_DELTA

@@ -48,15 +48,15 @@ def calculate_metrics(
         "roc_auc": float(roc_auc_score(labels, probabilities)),
         "pr_auc": float(average_precision_score(labels, probabilities)),
         "accuracy": float(accuracy_score(labels, predictions)),
-        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
-        "precision": float(precision_score(labels, predictions, zero_division=0)),
         "recall": float(recall_score(labels, predictions, zero_division=0)),
+        "precision": float(precision_score(labels, predictions, zero_division=0)),
         "f1": float(f1_score(labels, predictions, zero_division=0)),
-        "mcc": float(matthews_corrcoef(labels, predictions)),
         "tn": int(tn),
         "fp": int(fp),
         "fn": int(fn),
         "tp": int(tp),
+        "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+        "mcc": float(matthews_corrcoef(labels, predictions)),
     }
 
 
@@ -154,8 +154,10 @@ def save_train_validation_metrics_plot(
         ("ROC-AUC", "roc_auc"),
         ("PR-AUC", "pr_auc"),
         ("Accuracy", "accuracy"),
-        ("Balanced accuracy", "balanced_accuracy"),
+        ("Recall", "recall"),
+        ("Precision", "precision"),
         ("F1", "f1"),
+        ("Balanced accuracy", "balanced_accuracy"),
         ("MCC", "mcc"),
     )
     positions = np.arange(len(metric_names))
@@ -442,7 +444,14 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     print(
         f"SARS holdout ROC-AUC={validation_metrics['roc_auc']:.4f}, "
         f"PR-AUC={validation_metrics['pr_auc']:.4f}, "
-        f"F1={validation_metrics['f1']:.4f}"
+        f"Accuracy={validation_metrics['accuracy']:.4f}, "
+        f"Recall={validation_metrics['recall']:.4f}, "
+        f"Precision={validation_metrics['precision']:.4f}, "
+        f"F1={validation_metrics['f1']:.4f}, "
+        f"TN={validation_metrics['tn']}, FP={validation_metrics['fp']}, "
+        f"FN={validation_metrics['fn']}, TP={validation_metrics['tp']}, "
+        f"Balanced accuracy={validation_metrics['balanced_accuracy']:.4f}, "
+        f"MCC={validation_metrics['mcc']:.4f}"
     )
     print(f"Saved cross-dataset artifacts to: {output_dir}")
     return report
@@ -568,12 +577,26 @@ def _run_training_single(
     print(
         f"Training ROC-AUC={train_metrics['roc_auc']:.4f}, "
         f"PR-AUC={train_metrics['pr_auc']:.4f}, "
-        f"F1={train_metrics['f1']:.4f}"
+        f"Accuracy={train_metrics['accuracy']:.4f}, "
+        f"Recall={train_metrics['recall']:.4f}, "
+        f"Precision={train_metrics['precision']:.4f}, "
+        f"F1={train_metrics['f1']:.4f}, "
+        f"TN={train_metrics['tn']}, FP={train_metrics['fp']}, "
+        f"FN={train_metrics['fn']}, TP={train_metrics['tp']}, "
+        f"Balanced accuracy={train_metrics['balanced_accuracy']:.4f}, "
+        f"MCC={train_metrics['mcc']:.4f}"
     )
     print(
         f"Validation ROC-AUC={validation_metrics['roc_auc']:.4f}, "
         f"PR-AUC={validation_metrics['pr_auc']:.4f}, "
+        f"Accuracy={validation_metrics['accuracy']:.4f}, "
+        f"Recall={validation_metrics['recall']:.4f}, "
+        f"Precision={validation_metrics['precision']:.4f}, "
         f"F1={validation_metrics['f1']:.4f}"
+        f", TN={validation_metrics['tn']}, FP={validation_metrics['fp']}, "
+        f"FN={validation_metrics['fn']}, TP={validation_metrics['tp']}, "
+        f"Balanced accuracy={validation_metrics['balanced_accuracy']:.4f}, "
+        f"MCC={validation_metrics['mcc']:.4f}"
     )
 
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

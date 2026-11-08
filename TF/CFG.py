@@ -28,7 +28,11 @@ class CFG:
         self.CLASSIFIER_HIDDEN_SIZE = None  # Try 128/256/512; None uses half the encoder width.
         self.CLASSIFIER_DROPOUT = 0.5  # Try 0.3/0.5/0.7.
         self.CROSS_ATTENTION_HEADS = 8
-        self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
+        self.CROSS_ATTENTION_DROPOUT = 0.1
+        self.FEATURE_FUSION = "cross_attention"  # sequence_only, weighted_concat, cross_attention, se, gmu, film, late_fusion, low_rank_bilinear, gated_residual
+        self.FEATURE_FUSION_DROPOUT = 0.1
+        self.LATE_FUSION_DROPOUT = 0.5
+        self.LOW_RANK_BILINEAR_DIM = 32
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5
         self.MSD_DROPOUT = 0.3
@@ -72,6 +76,29 @@ class CFG:
         )
 
     def validate(self):
+        if not isinstance(self.FEATURE_FUSION, str) or self.FEATURE_FUSION.lower() not in {
+            "sequence_only",
+            "weighted_concat",
+            "cross_attention",
+            "se",
+            "gmu",
+            "film",
+            "late_fusion",
+            "low_rank_bilinear",
+            "gated_residual",
+        }:
+            raise ValueError(
+                "FEATURE_FUSION must be sequence_only, weighted_concat, "
+                "cross_attention, se, gmu, film, late_fusion, "
+                "low_rank_bilinear, or gated_residual."
+            )
+        self.FEATURE_FUSION = self.FEATURE_FUSION.lower()
+        if (
+            not isinstance(self.LOW_RANK_BILINEAR_DIM, int)
+            or isinstance(self.LOW_RANK_BILINEAR_DIM, bool)
+            or self.LOW_RANK_BILINEAR_DIM < 1
+        ):
+            raise ValueError("LOW_RANK_BILINEAR_DIM must be a positive integer.")
         if self.CLASSIFIER_TYPE.lower() not in {
             "pooled_mlp",
             "cnn",
@@ -105,6 +132,24 @@ class CFG:
             or self.CROSS_ATTENTION_HEADS < 1
         ):
             raise ValueError("CROSS_ATTENTION_HEADS must be a positive integer.")
+        if (
+            not isinstance(self.CROSS_ATTENTION_DROPOUT, (int, float))
+            or isinstance(self.CROSS_ATTENTION_DROPOUT, bool)
+            or not 0 <= self.CROSS_ATTENTION_DROPOUT < 1
+        ):
+            raise ValueError("CROSS_ATTENTION_DROPOUT must be in [0, 1).")
+        if (
+            not isinstance(self.FEATURE_FUSION_DROPOUT, (int, float))
+            or isinstance(self.FEATURE_FUSION_DROPOUT, bool)
+            or not 0 <= self.FEATURE_FUSION_DROPOUT < 1
+        ):
+            raise ValueError("FEATURE_FUSION_DROPOUT must be in [0, 1).")
+        if (
+            not isinstance(self.LATE_FUSION_DROPOUT, (int, float))
+            or isinstance(self.LATE_FUSION_DROPOUT, bool)
+            or not 0 <= self.LATE_FUSION_DROPOUT < 1
+        ):
+            raise ValueError("LATE_FUSION_DROPOUT must be in [0, 1).")
 
     @property
     def MODEL_NAME(self):

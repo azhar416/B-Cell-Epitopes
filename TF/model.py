@@ -69,6 +69,10 @@ class ProteinTransformerForClassification(nn.Module):
         classifier_dropout=0.5,
         num_features=8,
         cross_attention_heads=8,
+        cross_attention_dropout=0.1,
+        feature_fusion_dropout=0.1,
+        late_fusion_dropout=0.5,
+        low_rank_bilinear_dim=32,
         msd_samples=1,
         msd_dropout=0.3,
         use_dipeptide_features=False,
@@ -112,10 +116,15 @@ class ProteinTransformerForClassification(nn.Module):
             "cross_attention",
             "se",
             "gmu",
+            "film",
+            "late_fusion",
+            "low_rank_bilinear",
+            "gated_residual",
         }:
             raise ValueError(
                 "feature_fusion must be 'sequence_only', 'weighted_concat', "
-                "'cross_attention', 'se', or 'gmu'."
+                "'cross_attention', 'se', 'gmu', 'film', 'late_fusion', "
+                "'low_rank_bilinear', or 'gated_residual'."
             )
         self.num_features = num_features
         self.use_dipeptide_features = use_dipeptide_features
@@ -139,6 +148,30 @@ class ProteinTransformerForClassification(nn.Module):
             raise ValueError("classifier_hidden_size must be a positive integer or None.")
         if not 0 <= classifier_dropout < 1:
             raise ValueError("classifier_dropout must be in the range [0, 1).")
+        if (
+            not isinstance(low_rank_bilinear_dim, int)
+            or isinstance(low_rank_bilinear_dim, bool)
+            or low_rank_bilinear_dim < 1
+        ):
+            raise ValueError("low_rank_bilinear_dim must be a positive integer.")
+        if (
+            not isinstance(cross_attention_dropout, (int, float))
+            or isinstance(cross_attention_dropout, bool)
+            or not 0 <= cross_attention_dropout < 1
+        ):
+            raise ValueError("cross_attention_dropout must be in the range [0, 1).")
+        if (
+            not isinstance(feature_fusion_dropout, (int, float))
+            or isinstance(feature_fusion_dropout, bool)
+            or not 0 <= feature_fusion_dropout < 1
+        ):
+            raise ValueError("feature_fusion_dropout must be in the range [0, 1).")
+        if (
+            not isinstance(late_fusion_dropout, (int, float))
+            or isinstance(late_fusion_dropout, bool)
+            or not 0 <= late_fusion_dropout < 1
+        ):
+            raise ValueError("late_fusion_dropout must be in the range [0, 1).")
         if self.classifier_type == "cnn":
             if cnn_channels == "legacy":
                 cnn_channels = max(16, hidden_size // 4)
@@ -192,7 +225,7 @@ class ProteinTransformerForClassification(nn.Module):
             self.feature_encoder = nn.Sequential(
                 nn.Linear(num_features, hidden_size),
                 nn.GELU(),
-                nn.Dropout(p=0.1),
+                nn.Dropout(p=feature_fusion_dropout),
             )
             self.modality_weights = nn.Parameter(torch.zeros(2))
             classifier_input_size = hidden_size * 2
@@ -209,7 +242,7 @@ class ProteinTransformerForClassification(nn.Module):
             self.feature_cross_attention = nn.MultiheadAttention(
                 hidden_size,
                 num_heads=cross_attention_heads,
-                dropout=0.1,
+                dropout=cross_attention_dropout,
                 batch_first=True,
             )
             classifier_input_size = hidden_size * 2
@@ -224,6 +257,43 @@ class ProteinTransformerForClassification(nn.Module):
             self.gmu_sequence_projection = nn.Linear(hidden_size, hidden_size)
             self.gmu_feature_projection = nn.Linear(num_features, hidden_size)
             self.gmu_gate = nn.Linear(hidden_size * 2, hidden_size)
+        elif self.feature_fusion == "film":
+            self.film_feature_encoder = nn.Sequential(
+                nn.Linear(num_features, hidden_size),
+                nn.GELU(),
+                nn.Dropout(p=feature_fusion_dropout),
+            )
+            self.film_parameters = nn.Linear(hidden_size, hidden_size * 2)
+            nn.init.zeros_(self.film_parameters.weight)
+            nn.init.zeros_(self.film_parameters.bias)
+        elif self.feature_fusion == "low_rank_bilinear":
+            self.low_rank_bilinear_dim = low_rank_bilinear_dim
+            self.bilinear_sequence_projection = nn.Linear(
+                hidden_size,
+                low_rank_bilinear_dim,
+                bias=False,
+            )
+            self.bilinear_feature_projection = nn.Linear(
+                num_features,
+                low_rank_bilinear_dim,
+                bias=False,
+            )
+            classifier_input_size = hidden_size + low_rank_bilinear_dim
+        elif self.feature_fusion == "gated_residual":
+            self.gated_feature_encoder = nn.Sequential(
+                nn.Linear(num_features, hidden_size),
+                nn.GELU(),
+                nn.Dropout(p=feature_fusion_dropout),
+            )
+            self.gated_residual_gate = nn.Linear(hidden_size * 2, hidden_size)
+        elif self.feature_fusion == "late_fusion":
+            self.late_sequence_classifier = nn.Linear(hidden_size, 1)
+            self.late_feature_encoder = nn.Sequential(
+                nn.Linear(num_features, hidden_size),
+                nn.GELU(),
+                nn.Dropout(p=late_fusion_dropout),
+            )
+            self.late_fusion_weights = nn.Parameter(torch.zeros(2))
 
         if self.use_dipeptide_features:
             self.dipeptide_feature_encoder = nn.Sequential(
@@ -231,14 +301,26 @@ class ProteinTransformerForClassification(nn.Module):
                 nn.GELU(),
                 nn.Dropout(p=0.3),
             )
-            classifier_input_size += hidden_size
+            if self.feature_fusion == "late_fusion":
+                self.late_feature_classifier = nn.Linear(
+                    hidden_size * 2,
+                    1,
+                )
+            else:
+                classifier_input_size += hidden_size
 
-        self.classifier_hidden = nn.Sequential(
-            nn.Dropout(p=classifier_dropout),
-            nn.Linear(classifier_input_size, classifier_hidden_size),
-            nn.ReLU(),
-        )
-        self.classifier_output = nn.Linear(classifier_hidden_size, 1)
+        if self.feature_fusion == "late_fusion":
+            if not self.use_dipeptide_features:
+                self.late_feature_classifier = nn.Linear(hidden_size, 1)
+            self.classifier_hidden = None
+            self.classifier_output = None
+        else:
+            self.classifier_hidden = nn.Sequential(
+                nn.Dropout(p=classifier_dropout),
+                nn.Linear(classifier_input_size, classifier_hidden_size),
+                nn.ReLU(),
+            )
+            self.classifier_output = nn.Linear(classifier_hidden_size, 1)
 
     def forward(
         self,
@@ -256,7 +338,11 @@ class ProteinTransformerForClassification(nn.Module):
         if token_type_ids is not None and self.bert.config.model_type == "bert":
             model_inputs["token_type_ids"] = token_type_ids
         outputs = self.bert(**model_inputs)
-        head_dtype = self.classifier_hidden[1].weight.dtype
+        head_dtype = (
+            self.late_sequence_classifier.weight.dtype
+            if self.feature_fusion == "late_fusion"
+            else self.classifier_hidden[1].weight.dtype
+        )
         sequence_embeddings = outputs.last_hidden_state.to(dtype=head_dtype)
         if attention_mask is None:
             residue_mask = torch.ones(
@@ -362,7 +448,30 @@ class ProteinTransformerForClassification(nn.Module):
                     gate * sequence_projection
                     + (1 - gate) * feature_projection
                 )
+            elif self.feature_fusion == "film":
+                feature_context = self.film_feature_encoder(features)
+                scale, bias = self.film_parameters(feature_context).chunk(
+                    2,
+                    dim=-1,
+                )
+                fused = sequence_embedding * (1 + scale) + bias
+            elif self.feature_fusion == "low_rank_bilinear":
+                sequence_projection = self.bilinear_sequence_projection(
+                    sequence_embedding
+                )
+                feature_projection = self.bilinear_feature_projection(features)
+                interaction = sequence_projection * feature_projection
+                fused = torch.cat((sequence_embedding, interaction), dim=-1)
+            elif self.feature_fusion == "gated_residual":
+                feature_embedding = self.gated_feature_encoder(features)
+                gate = torch.sigmoid(
+                    self.gated_residual_gate(
+                        torch.cat((sequence_embedding, feature_embedding), dim=-1)
+                    )
+                )
+                fused = sequence_embedding + gate * feature_embedding
 
+        dipeptide_embedding = None
         if self.use_dipeptide_features:
             if dipeptide_features is None:
                 raise ValueError(
@@ -379,12 +488,34 @@ class ProteinTransformerForClassification(nn.Module):
             dipeptide_embedding = self.dipeptide_feature_encoder(
                 dipeptide_features.to(dtype=head_dtype)
             )
-            fused = torch.cat((fused, dipeptide_embedding), dim=-1)
         elif dipeptide_features is not None:
             raise ValueError(
                 "dipeptide_features were supplied but the model is not "
                 "configured to use them."
             )
+
+        if self.feature_fusion == "late_fusion":
+            if dipeptide_embedding is not None:
+                feature_embedding = torch.cat(
+                    (self.late_feature_encoder(features), dipeptide_embedding),
+                    dim=-1,
+                )
+            else:
+                feature_embedding = self.late_feature_encoder(features)
+            weights = torch.softmax(self.late_fusion_weights, dim=0)
+            logits = []
+            for _ in range(self.msd_samples if self.training else 1):
+                sequence_input = self.msd_dropout(sequence_embedding)
+                feature_input = self.msd_dropout(feature_embedding)
+                sequence_logits = self.late_sequence_classifier(sequence_input)
+                feature_logits = self.late_feature_classifier(feature_input)
+                logits.append(
+                    weights[0] * sequence_logits + weights[1] * feature_logits
+                )
+            return torch.sigmoid(torch.stack(logits).mean(dim=0)).squeeze(-1)
+
+        if dipeptide_embedding is not None:
+            fused = torch.cat((fused, dipeptide_embedding), dim=-1)
 
         hidden = self.classifier_hidden(fused)
         if self.training and self.msd_samples > 1:
