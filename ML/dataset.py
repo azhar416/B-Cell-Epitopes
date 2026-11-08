@@ -4,7 +4,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 
 from ML.pre_dataset import normalize_sequence
 
@@ -178,3 +183,63 @@ def make_grouped_split(
     if np.intersect1d(groups[train_indices], groups[validation_indices]).size:
         raise RuntimeError("Protein-level split placed a group in both partitions.")
     return train_indices, validation_indices
+
+
+def make_cross_validation_splits(
+    labels: np.ndarray,
+    groups: np.ndarray,
+    dataset_name: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
+    """Create five stratified folds, grouping proteins except for SARS."""
+    labels = np.asarray(labels, dtype=np.int64).reshape(-1)
+    groups = np.asarray(groups).reshape(-1)
+    if labels.size == 0 or labels.size != groups.size:
+        raise ValueError("labels and groups must have the same non-zero length.")
+    if np.unique(labels).size != 2:
+        raise ValueError("Cross-validation requires examples of both classes.")
+    if n_splits < 2:
+        raise ValueError("n_splits must be at least 2.")
+
+    if dataset_name.lower() == "sars":
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=random_state,
+        )
+        folds = list(splitter.split(np.zeros(labels.size), labels))
+        strategy = "stratified_peptide_5_fold"
+    else:
+        if pd.isna(groups).any():
+            raise ValueError("Protein groups must not contain missing values.")
+        if pd.unique(groups).size < n_splits:
+            raise ValueError(
+                f"Protein-level {n_splits}-fold CV requires at least "
+                f"{n_splits} proteins; found {pd.unique(groups).size}."
+            )
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=random_state,
+        )
+        folds = list(splitter.split(np.zeros(labels.size), labels, groups))
+        strategy = "stratified_protein_group_5_fold"
+
+    for fold_number, (train_indices, validation_indices) in enumerate(folds, 1):
+        if (
+            np.unique(labels[train_indices]).size != 2
+            or np.unique(labels[validation_indices]).size != 2
+        ):
+            raise ValueError(
+                f"{strategy} fold {fold_number} does not contain both classes "
+                "in train and validation."
+            )
+        if dataset_name.lower() != "sars" and np.intersect1d(
+            groups[train_indices],
+            groups[validation_indices],
+        ).size:
+            raise RuntimeError(
+                f"Protein overlap detected in cross-validation fold {fold_number}."
+            )
+    return folds, strategy

@@ -2,7 +2,12 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 
 from EmbeddingML.preprocessing import BIOLOGICAL_FEATURE_COLUMNS
 
@@ -113,6 +118,60 @@ def make_dataset_split(
         random_state=random_state,
     )
     return train_indices, validation_indices, "protein_group_holdout"
+
+
+def make_cross_validation_splits(
+    dataframe: pd.DataFrame,
+    dataset_name: str,
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
+    """Create stratified peptide folds for SARS and protein folds otherwise."""
+    labels = dataframe["target"].to_numpy(dtype=np.int64)
+    groups = dataframe["parent_protein_id"].to_numpy()
+    if n_splits < 2:
+        raise ValueError("n_splits must be at least 2.")
+    if dataset_name.lower() == "sars":
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=random_state,
+        )
+        folds = list(splitter.split(np.zeros(len(labels)), labels))
+        strategy = "stratified_peptide_5_fold"
+    else:
+        if pd.isna(groups).any():
+            raise ValueError("Protein groups must not contain missing values.")
+        if pd.unique(groups).size < n_splits:
+            raise ValueError(
+                f"Protein-level {n_splits}-fold CV requires at least "
+                f"{n_splits} proteins; found {pd.unique(groups).size}."
+            )
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=random_state,
+        )
+        folds = list(splitter.split(np.zeros(len(labels)), labels, groups))
+        strategy = "stratified_protein_group_5_fold"
+
+    for fold_number, (train_indices, validation_indices) in enumerate(folds, 1):
+        if (
+            np.unique(labels[train_indices]).size != 2
+            or np.unique(labels[validation_indices]).size != 2
+        ):
+            raise ValueError(
+                f"{strategy} fold {fold_number} does not contain both classes "
+                "in train and validation."
+            )
+        if dataset_name.lower() != "sars" and np.intersect1d(
+            groups[train_indices],
+            groups[validation_indices],
+        ).size:
+            raise RuntimeError(
+                f"Protein overlap detected in cross-validation fold {fold_number}."
+            )
+    return folds, strategy
 
 
 def assemble_features(

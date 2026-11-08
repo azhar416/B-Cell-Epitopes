@@ -1,8 +1,10 @@
+import json
 from pathlib import Path
 from copy import copy
 import random
 
 import numpy as np
+import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 from sklearn.impute import SimpleImputer
@@ -21,6 +23,7 @@ from TF.dataset import (
     DIPEPTIDE_COLUMNS,
     DESCRIPTOR_COLUMNS,
     grouped_split_indices,
+    cross_validation_splits,
     scale_dipeptide_features,
     scale_descriptor_features,
     stratified_split_indices,
@@ -964,7 +967,14 @@ def train_model(
     return model, history
 
 
-def _train_embedding_smote_split(dataset, cfg, device):
+def _train_embedding_smote_split(
+    dataset,
+    cfg,
+    device,
+    split_indices=None,
+    split_strategy_override=None,
+    fold_number=None,
+):
     """Split by dataset protocol, then train on frozen embeddings with SMOTE."""
     if cfg.EPOCHS < 1:
         raise ValueError("EPOCHS must be at least 1.")
@@ -981,7 +991,10 @@ def _train_embedding_smote_split(dataset, cfg, device):
     groups = getattr(dataset, "group_ids", None)
     if groups is None:
         raise ValueError("Dataset splitting requires dataset.group_ids.")
-    if cfg.DATASET_NAME.lower() == "sars":
+    if split_indices is not None:
+        train_indices, validation_indices = split_indices
+        split_strategy = split_strategy_override or "cross_validation"
+    elif cfg.DATASET_NAME.lower() == "sars":
         train_indices, validation_indices = stratified_split_indices(
             labels,
             validation_size=cfg.VALIDATION_SIZE,
@@ -1289,6 +1302,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+    train_metrics, _, _ = evaluate(train_eval_loader)
     validation_metrics, validation_targets, validation_probabilities = evaluate(
         validation_loader
     )
@@ -1338,6 +1352,7 @@ def _train_embedding_smote_split(dataset, cfg, device):
     return {
         "model": model,
         "history": history,
+        "training_metrics": train_metrics,
         "train_indices": train_indices,
         "validation_indices": validation_indices,
         "train_class_counts": train_class_counts,
@@ -1354,7 +1369,8 @@ def _train_embedding_smote_split(dataset, cfg, device):
         "evaluation_plots": evaluation_plots,
         "feature_fusion": "embedding_concatenation",
         "training_mode": "protein_split_embedding_mlp",
-        "split_strategy": "protein_group_holdout",
+        "split_strategy": split_strategy,
+        "fold": fold_number,
         "n_original_examples": original_size,
         "n_examples_after_smote": len(fit_labels),
         "n_synthetic_examples": synthetic_count,
@@ -1378,16 +1394,21 @@ def _train_embedding_smote_split(dataset, cfg, device):
         ),
         "classifier_type": "pooled_mlp",
         "best_epoch": best_epoch,
+        "validation_targets": validation_targets,
+        "validation_probabilities": validation_probabilities,
     }
 
 
-def train_validation_split(
+def _train_validation_fold(
     dataset,
     cfg=None,
     device=None,
     model_factory=None,
+    split_indices=None,
+    split_strategy_override=None,
+    fold_number=None,
 ):
-    """Train and evaluate with a protein split, or peptide split for SARS."""
+    """Train and evaluate one specified cross-validation fold."""
     cfg = cfg or CFG()
     classifier_type = _validate_classifier_type(cfg)
     if not hasattr(dataset, "labels"):
@@ -1419,12 +1440,18 @@ def train_validation_split(
             dataset=dataset,
             cfg=cfg,
             device=device,
+            split_indices=split_indices,
+            split_strategy_override=split_strategy_override,
+            fold_number=fold_number,
         )
     labels = dataset.labels.detach().cpu().numpy().reshape(-1)
     groups = getattr(dataset, "group_ids", None)
     if groups is None:
         raise ValueError("Dataset splitting requires dataset.group_ids.")
-    if cfg.DATASET_NAME.lower() == "sars":
+    if split_indices is not None:
+        train_indices, validation_indices = split_indices
+        split_strategy = split_strategy_override or "cross_validation"
+    elif cfg.DATASET_NAME.lower() == "sars":
         train_indices, validation_indices = stratified_split_indices(
             labels,
             validation_size=cfg.VALIDATION_SIZE,
@@ -1508,6 +1535,18 @@ def train_validation_split(
         device=evaluation_device,
         return_predictions=True,
     )
+    training_metrics = _evaluate_dataset(
+        model=model,
+        data_loader=_make_loader(
+            train_subset,
+            cfg,
+            shuffle=False,
+            device=evaluation_device,
+        ),
+        criterion=_build_loss_function(cfg),
+        cfg=cfg,
+        device=evaluation_device,
+    )
     validation_targets = validation_metrics.pop("targets")
     validation_probabilities = validation_metrics.pop("probabilities")
     evaluation_plots = _save_evaluation_plots(
@@ -1534,7 +1573,11 @@ def train_validation_split(
             labels[validation_indices].astype(int),
             minlength=2,
         ),
+        "training_metrics": training_metrics,
         "validation_metrics": validation_metrics,
+        "validation_targets": validation_targets,
+        "validation_probabilities": validation_probabilities,
+        "fold": fold_number,
         "training_history_plot": history_plot,
         "evaluation_plots": evaluation_plots,
         "feature_fusion": cfg.FEATURE_FUSION,
@@ -1546,6 +1589,166 @@ def train_validation_split(
             False,
         ),
     }
+
+
+def train_validation_split(
+    dataset,
+    cfg=None,
+    device=None,
+    model_factory=None,
+):
+    """Train and evaluate five stratified folds, grouping proteins for B-cell."""
+    cfg = cfg or CFG()
+    _validate_classifier_type(cfg)
+    if not hasattr(dataset, "labels"):
+        raise TypeError("dataset must expose a labels attribute.")
+    labels = dataset.labels.detach().cpu().numpy().reshape(-1).astype(np.int64)
+    groups = getattr(dataset, "group_ids", None)
+    if groups is None:
+        raise ValueError("Dataset splitting requires dataset.group_ids.")
+    folds, split_strategy = cross_validation_splits(
+        labels,
+        groups,
+        cfg.DATASET_NAME,
+        n_splits=5,
+        random_state=cfg.SEED,
+    )
+    base_checkpoint_path = Path(cfg.CHECKPOINT_PATH)
+    fold_results = []
+    for fold_number, fold_split in enumerate(folds, 1):
+        fold_cfg = copy(cfg)
+        fold_directory = (
+            base_checkpoint_path.parent
+            / "cross_validation"
+            / f"fold_{fold_number}"
+        )
+        fold_cfg.CHECKPOINT_PATH = str(
+            fold_directory / base_checkpoint_path.name
+        )
+        fold_cfg.SEED = cfg.SEED + fold_number - 1
+        fold_results.append(
+            _train_validation_fold(
+                dataset=dataset,
+                cfg=fold_cfg,
+                device=device,
+                model_factory=model_factory,
+                split_indices=fold_split,
+                split_strategy_override=split_strategy,
+                fold_number=fold_number,
+            )
+        )
+        print(
+            f"Fold {fold_number}/5 training ROC-AUC="
+            f"{fold_results[-1]['training_metrics']['auc']:.4f}, "
+            f"evaluation ROC-AUC="
+            f"{fold_results[-1]['validation_metrics']['auc']:.4f}."
+        )
+
+    prediction_frames = []
+    for fold_number, result in enumerate(fold_results, 1):
+        validation_indices = result["validation_indices"]
+        prediction_frames.append(
+            pd.DataFrame(
+                {
+                    "fold": fold_number,
+                    "parent_protein_id": np.asarray(groups)[validation_indices],
+                    "target": result["validation_targets"],
+                    "probability": result["validation_probabilities"],
+                }
+            )
+        )
+    out_of_fold_predictions = pd.concat(prediction_frames, ignore_index=True)
+    output_directory = base_checkpoint_path.parent / "cross_validation"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    predictions_path = output_directory / "out_of_fold_predictions.csv"
+    out_of_fold_predictions.to_csv(predictions_path, index=False)
+    pooled_metrics = _binary_metrics(
+        [out_of_fold_predictions["target"].to_numpy()],
+        [out_of_fold_predictions["probability"].to_numpy()],
+        cfg.PREDICTION_THRESHOLD,
+    )
+    metric_names = [
+        metric
+        for metric, value in fold_results[0]["validation_metrics"].items()
+        if np.isscalar(value)
+    ]
+    mean_validation_metrics = {
+        metric: float(
+            np.mean(
+                [result["validation_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in metric_names
+    }
+    std_validation_metrics = {
+        metric: float(
+            np.std(
+                [result["validation_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in metric_names
+    }
+    training_metric_names = [
+        metric
+        for metric, value in fold_results[0]["training_metrics"].items()
+        if np.isscalar(value)
+    ]
+    mean_training_metrics = {
+        metric: float(
+            np.mean(
+                [result["training_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in training_metric_names
+    }
+    std_training_metrics = {
+        metric: float(
+            np.std(
+                [result["training_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in training_metric_names
+    }
+    report = {
+        "dataset_name": cfg.DATASET_NAME,
+        "split_strategy": split_strategy,
+        "n_splits": 5,
+        "fold_metrics": [
+            {
+                "fold": fold_number,
+                "training_metrics": result["training_metrics"],
+                "validation_metrics": result["validation_metrics"],
+                "training_history_plot": result["training_history_plot"],
+                "evaluation_plots": result["evaluation_plots"],
+            }
+            for fold_number, result in enumerate(fold_results, 1)
+        ],
+        "mean_training_metrics": mean_training_metrics,
+        "std_training_metrics": std_training_metrics,
+        "mean_validation_metrics": mean_validation_metrics,
+        "std_validation_metrics": std_validation_metrics,
+        "validation_metrics": pooled_metrics,
+        "out_of_fold_predictions": str(predictions_path),
+        "train_validation_proteins_overlap": (
+            cfg.DATASET_NAME.lower() == "sars"
+        ),
+        "validation_metrics_interpretation": (
+            "Pooled out-of-fold predictions from stratified peptide folds. "
+            "The same SARS protein is present in all folds."
+            if cfg.DATASET_NAME.lower() == "sars"
+            else "Pooled out-of-fold predictions from five stratified "
+            "protein-group folds with no protein crossing folds."
+        ),
+    }
+    metrics_path = output_directory / "cross_validation_metrics.json"
+    metrics_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(
+        f"5-fold CV complete ({split_strategy}); "
+        f"pooled ROC-AUC={pooled_metrics['auc']:.4f}, "
+        f"PR-AUC={pooled_metrics['pr_auc']:.4f}."
+    )
+    print(f"Cross-validation metrics saved to {metrics_path}")
+    return report
 
 
 def _evaluate_dataset(

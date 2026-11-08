@@ -1,6 +1,7 @@
 """Train and evaluate a peptide classifier with a protein-group holdout."""
 
 import argparse
+import copy
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -25,6 +26,7 @@ from sklearn.metrics import (
 
 from ML.CFG import CFG
 from ML.dataset import (
+    make_cross_validation_splits,
     load_labeled_dataset,
     make_grouped_split,
     make_stratified_split,
@@ -209,11 +211,23 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     )
     bcell_labels = bcell_data["target"].to_numpy(dtype=int)
     sars_labels = sars_data["target"].to_numpy(dtype=int)
-    sars_train_indices, sars_validation_indices = make_stratified_split(
-        labels=sars_labels,
-        validation_size=config.VALIDATION_SIZE,
-        random_state=config.RANDOM_STATE,
+    fold_validation_indices = getattr(
+        config,
+        "_CV_SARS_VALIDATION_INDICES",
+        None,
     )
+    if fold_validation_indices is None:
+        sars_train_indices, sars_validation_indices = make_stratified_split(
+            labels=sars_labels,
+            validation_size=config.VALIDATION_SIZE,
+            random_state=config.RANDOM_STATE,
+        )
+    else:
+        sars_validation_indices = np.asarray(fold_validation_indices, dtype=int)
+        sars_train_indices = np.setdiff1d(
+            np.arange(len(sars_labels)),
+            sars_validation_indices,
+        )
     bcell_features = _build_configured_features(bcell_data, config)
     sars_features = _build_configured_features(sars_data, config)
     if not bcell_features.columns.equals(sars_features.columns):
@@ -260,7 +274,11 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         threshold=config.PREDICTION_THRESHOLD,
     )
 
-    output_dir = config.OUTPUT_DIR / "bcell_to_sars"
+    output_dir = (
+        config.OUTPUT_DIR
+        if getattr(config, "_CV_FOLD_NUMBER", None) is not None
+        else config.OUTPUT_DIR / "bcell_to_sars"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     comparison_plot = save_train_validation_metrics_plot(
         train_metrics,
@@ -329,7 +347,12 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
-        "split_strategy": "stratified_peptide_sars_holdout",
+        "split_strategy": (
+            "stratified_peptide_5_fold"
+            if fold_validation_indices is not None
+            else "stratified_peptide_sars_holdout"
+        ),
+        "fold": getattr(config, "_CV_FOLD_NUMBER", None),
         "train_size": original_bcell_size,
         "validation_size": len(sars_validation_indices),
         "sars_train_unused_size": len(sars_train_indices),
@@ -416,8 +439,12 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     return report
 
 
-def run_training(config: CFG) -> dict[str, object]:
-    """Run same-dataset training or B-cell-to-SARS transfer evaluation."""
+def _run_training_single(
+    config: CFG,
+    supplied_split: tuple[np.ndarray, np.ndarray] | None = None,
+    split_strategy_override: str | None = None,
+) -> dict[str, object]:
+    """Run one training fold using the existing dataset-specific pipeline."""
     config.validate()
     if config.TRAINING_MODE == "bcell_to_sars":
         return _run_bcell_to_sars(config)
@@ -435,7 +462,10 @@ def run_training(config: CFG) -> dict[str, object]:
         peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
     )
     labels = dataframe["target"].to_numpy(dtype=int)
-    if config.DATASET_NAME.lower() == "sars":
+    if supplied_split is not None:
+        train_indices, validation_indices = supplied_split
+        split_strategy = split_strategy_override or "cross_validation"
+    elif config.DATASET_NAME.lower() == "sars":
         train_indices, validation_indices = make_stratified_split(
             labels=labels,
             validation_size=config.VALIDATION_SIZE,
@@ -635,6 +665,157 @@ def run_training(config: CFG) -> dict[str, object]:
         "\nSaved fitted model bundle, validation predictions, and metrics to: "
         f"{config.OUTPUT_DIR}"
     )
+    return report
+
+
+def run_training(config: CFG) -> dict[str, object]:
+    """Run five-fold CV, grouping proteins except for peptide-level SARS folds."""
+    config.validate()
+    if config.TRAINING_MODE == "bcell_to_sars":
+        sars_data = load_labeled_dataset(
+            dataset_name="sars",
+            data_dir=config.EVALUATION_DATA_DIR or config.DATA_DIR,
+            max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        )
+        folds, split_strategy = make_cross_validation_splits(
+            sars_data["target"].to_numpy(dtype=int),
+            sars_data["parent_protein_id"].to_numpy(),
+            dataset_name="sars",
+            n_splits=5,
+            random_state=config.RANDOM_STATE,
+        )
+        summary_dir = config.OUTPUT_DIR / "bcell_to_sars" / "cross_validation"
+    else:
+        dataframe = load_labeled_dataset(
+            dataset_name=config.DATASET_NAME,
+            data_dir=config.DATA_DIR,
+            max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        )
+        folds, split_strategy = make_cross_validation_splits(
+            dataframe["target"].to_numpy(dtype=int),
+            dataframe["parent_protein_id"].to_numpy(),
+            dataset_name=config.DATASET_NAME,
+            n_splits=5,
+            random_state=config.RANDOM_STATE,
+        )
+        summary_dir = config.OUTPUT_DIR / "cross_validation"
+
+    fold_reports = []
+    for fold_number, fold_split in enumerate(folds, 1):
+        fold_config = copy.copy(config)
+        fold_config.OUTPUT_DIR = (
+            summary_dir.parent / f"fold_{fold_number}"
+            if config.TRAINING_MODE == "bcell_to_sars"
+            else config.OUTPUT_DIR / "cross_validation" / f"fold_{fold_number}"
+        )
+        fold_config._CV_FOLD_NUMBER = fold_number
+        if config.TRAINING_MODE == "bcell_to_sars":
+            fold_config._CV_SARS_VALIDATION_INDICES = fold_split[1]
+            fold_report = _run_training_single(fold_config)
+        else:
+            fold_report = _run_training_single(
+                fold_config,
+                supplied_split=fold_split,
+                split_strategy_override=split_strategy,
+            )
+        fold_reports.append(fold_report)
+
+    prediction_frames = []
+    for fold_number, fold_report in enumerate(fold_reports, 1):
+        prediction_path = Path(fold_report["validation_predictions"])
+        fold_predictions = pd.read_csv(prediction_path)
+        probability_column = (
+            "validation_probability"
+            if "validation_probability" in fold_predictions
+            else "probability"
+        )
+        fold_predictions["fold"] = fold_number
+        fold_predictions["validation_probability"] = fold_predictions[
+            probability_column
+        ]
+        prediction_frames.append(fold_predictions)
+
+    out_of_fold_predictions = pd.concat(prediction_frames, ignore_index=True)
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    predictions_path = summary_dir / "out_of_fold_predictions.csv"
+    out_of_fold_predictions.to_csv(predictions_path, index=False)
+    pooled_metrics = calculate_metrics(
+        out_of_fold_predictions["target"].to_numpy(dtype=int),
+        out_of_fold_predictions["validation_probability"].to_numpy(dtype=float),
+        threshold=config.PREDICTION_THRESHOLD,
+    )
+    validation_metric_names = fold_reports[0]["validation_metrics"]
+    mean_validation_metrics = {
+        metric: float(
+            np.mean([report["validation_metrics"][metric] for report in fold_reports])
+        )
+        for metric in validation_metric_names
+    }
+    std_validation_metrics = {
+        metric: float(
+            np.std([report["validation_metrics"][metric] for report in fold_reports])
+        )
+        for metric in validation_metric_names
+    }
+    training_metric_names = fold_reports[0]["training_metrics"]
+    mean_training_metrics = {
+        metric: float(
+            np.mean([report["training_metrics"][metric] for report in fold_reports])
+        )
+        for metric in training_metric_names
+    }
+    std_training_metrics = {
+        metric: float(
+            np.std([report["training_metrics"][metric] for report in fold_reports])
+        )
+        for metric in training_metric_names
+    }
+    report: dict[str, object] = {
+        "dataset": config.DATASET_NAME,
+        "training_mode": config.TRAINING_MODE,
+        "model": config.MODEL_TYPE,
+        "split_strategy": split_strategy,
+        "n_splits": 5,
+        "fold_metrics": [
+            {
+                "fold": fold_number,
+                "train_size": fold_report["train_size"],
+                "validation_size": fold_report["validation_size"],
+                "training_metrics": fold_report["training_metrics"],
+                "validation_metrics": fold_report["validation_metrics"],
+                "artifact_directory": fold_report["artifact_directory"],
+            }
+            for fold_number, fold_report in enumerate(fold_reports, 1)
+        ],
+        "mean_training_metrics": mean_training_metrics,
+        "std_training_metrics": std_training_metrics,
+        "mean_validation_metrics": mean_validation_metrics,
+        "std_validation_metrics": std_validation_metrics,
+        "training_metrics": mean_training_metrics,
+        "validation_metrics": pooled_metrics,
+        "out_of_fold_predictions": str(predictions_path),
+        "artifact_directory": str(summary_dir),
+        "fold_reports": fold_reports,
+        "validation_metrics_interpretation": (
+            "Pooled out-of-fold predictions from five folds. B-cell folds hold "
+            "out complete proteins; SARS folds stratify peptides and share the "
+            "single source protein across folds."
+            if config.DATASET_NAME.lower() == "sars"
+            else "Pooled out-of-fold predictions from five stratified "
+            "protein-group folds."
+        ),
+    }
+    with (summary_dir / "cross_validation_metrics.json").open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(report, file, indent=2)
+    print(
+        f"5-fold CV complete ({split_strategy}). "
+        f"Pooled ROC-AUC={pooled_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={pooled_metrics['pr_auc']:.4f}."
+    )
+    print(f"Saved cross-validation report to: {summary_dir}")
     return report
 
 

@@ -1,5 +1,6 @@
 import json
 import random
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,12 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GroupShuffleSplit,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    train_test_split,
+)
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 
@@ -161,7 +167,12 @@ def _evaluate(model, data_loader, criterion, device, threshold):
     return metrics, np.asarray(all_labels), np.asarray(all_probabilities)
 
 
-def run_training(config=None):
+def _run_training_fold(
+    config=None,
+    split_indices=None,
+    split_strategy_override=None,
+    fold_number=None,
+):
     config = config or CFG()
     config.validate()
     set_seed(config.RANDOM_STATE)
@@ -181,7 +192,10 @@ def run_training(config=None):
     dataset = PeptideSequenceDataset(dataframe)
     labels = dataset.labels.numpy().astype(np.int64)
     groups = dataframe["parent_protein_id"].to_numpy()
-    if config.DATASET_NAME.lower() == "sars":
+    if split_indices is not None:
+        train_indices, validation_indices = split_indices
+        split_strategy = split_strategy_override or "cross_validation"
+    elif config.DATASET_NAME.lower() == "sars":
         train_indices, validation_indices = make_stratified_split(
             labels,
             validation_size=config.VALIDATION_SIZE,
@@ -315,6 +329,13 @@ def run_training(config=None):
     if best_state is None:
         raise RuntimeError("Training did not produce a valid model checkpoint.")
     model.load_state_dict(best_state)
+    train_metrics, train_labels, train_probabilities = _evaluate(
+        model,
+        train_eval_loader,
+        criterion,
+        device,
+        config.PREDICTION_THRESHOLD,
+    )
     validation_metrics, validation_labels, validation_probabilities = _evaluate(
         model,
         validation_loader,
@@ -343,14 +364,44 @@ def run_training(config=None):
         },
         checkpoint_path,
     )
+    pd.DataFrame(
+        {
+            "fold": fold_number,
+            "peptide_seq": dataframe.iloc[train_indices][
+                "peptide_seq"
+            ].to_numpy(),
+            "parent_protein_id": groups[train_indices],
+            "target": train_labels.astype(int),
+            "probability": train_probabilities,
+            "prediction": (
+                train_probabilities >= config.PREDICTION_THRESHOLD
+            ).astype(int),
+        }
+    ).to_csv(output_dir / "training_predictions.csv", index=False)
     metrics_path = output_dir / "validation_metrics.json"
+    pd.DataFrame(
+        {
+            "fold": fold_number,
+            "peptide_seq": dataframe.iloc[validation_indices][
+                "peptide_seq"
+            ].to_numpy(),
+            "parent_protein_id": groups[validation_indices],
+            "target": validation_labels.astype(int),
+            "probability": validation_probabilities,
+            "prediction": (
+                validation_probabilities >= config.PREDICTION_THRESHOLD
+            ).astype(int),
+        }
+    ).to_csv(output_dir / "validation_predictions.csv", index=False)
     metrics_path.write_text(
         json.dumps(
             {
+                "training_metrics": train_metrics,
                 "validation_metrics": validation_metrics,
                 "validation_labels": validation_labels.astype(int).tolist(),
                 "validation_probabilities": validation_probabilities.tolist(),
                 "best_epoch": best_epoch,
+                "fold": fold_number,
                 "split_strategy": split_strategy,
                 "train_size": len(train_indices),
                 "validation_size": len(validation_indices),
@@ -369,7 +420,13 @@ def run_training(config=None):
         encoding="utf-8",
     )
     print(f"Best epoch: {best_epoch}; checkpoint: {checkpoint_path}")
-    print(f"Validation metrics saved to {metrics_path}")
+    print(
+        f"Fold {fold_number} training ROC-AUC={train_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={train_metrics['pr_auc']:.4f}; evaluation "
+        f"ROC-AUC={validation_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={validation_metrics['pr_auc']:.4f}."
+    )
+    print(f"Training and evaluation metrics saved to {metrics_path}")
     return {
         "model": model,
         "history": history,
@@ -383,7 +440,178 @@ def run_training(config=None):
         "train_validation_proteins_overlap": bool(
             set(groups[train_indices]) & set(groups[validation_indices])
         ),
+        "training_metrics": train_metrics,
         "validation_metrics": validation_metrics,
+        "validation_labels": validation_labels,
+        "validation_probabilities": validation_probabilities,
         "checkpoint_path": str(checkpoint_path),
         "metrics_path": str(metrics_path),
     }
+
+
+def run_training(config=None):
+    """Run five stratified CV folds; protein groups stay intact for B-cell."""
+    config = config or CFG()
+    config.validate()
+    dataframe = load_dataset(
+        dataset_name=config.DATASET_NAME,
+        data_dir=config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        flanking_size=config.FLANKING_SIZE,
+    )
+    labels = dataframe["target"].to_numpy(dtype=np.int64)
+    groups = dataframe["parent_protein_id"].to_numpy()
+    n_splits = 5
+    if config.DATASET_NAME.lower() == "sars":
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=config.RANDOM_STATE,
+        )
+        folds = list(splitter.split(np.zeros(len(labels)), labels))
+        split_strategy = "stratified_peptide_5_fold"
+    else:
+        if pd.isna(groups).any():
+            raise ValueError("Protein groups must not contain missing values.")
+        if pd.unique(groups).size < n_splits:
+            raise ValueError(
+                f"Protein-level {n_splits}-fold CV requires at least "
+                f"{n_splits} proteins; found {pd.unique(groups).size}."
+            )
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=config.RANDOM_STATE,
+        )
+        folds = list(splitter.split(np.zeros(len(labels)), labels, groups))
+        split_strategy = "stratified_protein_group_5_fold"
+
+    for fold_number, (train_indices, validation_indices) in enumerate(folds, 1):
+        if (
+            np.unique(labels[train_indices]).size != 2
+            or np.unique(labels[validation_indices]).size != 2
+        ):
+            raise ValueError(
+                f"{split_strategy} fold {fold_number} must contain both classes."
+            )
+        if config.DATASET_NAME.lower() != "sars" and np.intersect1d(
+            groups[train_indices],
+            groups[validation_indices],
+        ).size:
+            raise RuntimeError(
+                f"Protein overlap detected in fold {fold_number}."
+            )
+
+    fold_results = []
+    for fold_number, fold_split in enumerate(folds, 1):
+        fold_config = copy.copy(config)
+        fold_config.OUTPUT_DIR = (
+            Path(config.OUTPUT_DIR)
+            / "cross_validation"
+            / f"fold_{fold_number}"
+        )
+        fold_config.RANDOM_STATE = config.RANDOM_STATE + fold_number - 1
+        fold_results.append(
+            _run_training_fold(
+                fold_config,
+                split_indices=fold_split,
+                split_strategy_override=split_strategy,
+                fold_number=fold_number,
+            )
+        )
+
+    output_dir = Path(config.OUTPUT_DIR) / "cross_validation"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prediction_frames = [
+        pd.read_csv(
+            Path(config.OUTPUT_DIR)
+            / "cross_validation"
+            / f"fold_{fold_number}"
+            / "validation_predictions.csv"
+        )
+        for fold_number in range(1, n_splits + 1)
+    ]
+    out_of_fold_predictions = pd.concat(prediction_frames, ignore_index=True)
+    predictions_path = output_dir / "out_of_fold_predictions.csv"
+    out_of_fold_predictions.to_csv(predictions_path, index=False)
+    pooled_metrics = calculate_metrics(
+        out_of_fold_predictions["target"].to_numpy(dtype=int),
+        out_of_fold_predictions["probability"].to_numpy(dtype=float),
+        threshold=config.PREDICTION_THRESHOLD,
+    )
+    metric_names = fold_results[0]["validation_metrics"]
+    mean_validation_metrics = {
+        metric: float(
+            np.mean(
+                [result["validation_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in metric_names
+    }
+    std_validation_metrics = {
+        metric: float(
+            np.std(
+                [result["validation_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in metric_names
+    }
+    training_metric_names = fold_results[0]["training_metrics"]
+    mean_training_metrics = {
+        metric: float(
+            np.mean(
+                [result["training_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in training_metric_names
+    }
+    std_training_metrics = {
+        metric: float(
+            np.std(
+                [result["training_metrics"][metric] for result in fold_results]
+            )
+        )
+        for metric in training_metric_names
+    }
+    report = {
+        "dataset_name": config.DATASET_NAME,
+        "split_strategy": split_strategy,
+        "n_splits": n_splits,
+        "fold_metrics": [
+            {
+                "fold": fold_number,
+                "training_metrics": result["training_metrics"],
+                "validation_metrics": result["validation_metrics"],
+                "best_epoch": json.loads(
+                    Path(result["metrics_path"]).read_text(encoding="utf-8")
+                )["best_epoch"],
+                "checkpoint_path": result["checkpoint_path"],
+            }
+            for fold_number, result in enumerate(fold_results, 1)
+        ],
+        "mean_training_metrics": mean_training_metrics,
+        "std_training_metrics": std_training_metrics,
+        "mean_validation_metrics": mean_validation_metrics,
+        "std_validation_metrics": std_validation_metrics,
+        "validation_metrics": pooled_metrics,
+        "out_of_fold_predictions": str(predictions_path),
+        "train_validation_proteins_overlap": (
+            config.DATASET_NAME.lower() == "sars"
+        ),
+        "validation_metrics_interpretation": (
+            "Pooled out-of-fold predictions from stratified peptide folds. "
+            "The same SARS protein is present in all folds."
+            if config.DATASET_NAME.lower() == "sars"
+            else "Pooled out-of-fold predictions from five stratified "
+            "protein-group folds with no protein crossing folds."
+        ),
+    }
+    metrics_path = output_dir / "cross_validation_metrics.json"
+    metrics_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(
+        f"5-fold CV complete ({split_strategy}); "
+        f"pooled ROC-AUC={pooled_metrics['roc_auc']:.4f}, "
+        f"PR-AUC={pooled_metrics['pr_auc']:.4f}."
+    )
+    print(f"Cross-validation metrics saved to {metrics_path}")
+    return report
