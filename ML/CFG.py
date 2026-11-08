@@ -25,7 +25,21 @@ class CFG:
     SMOTE_K_NEIGHBORS: int = 5
     MAX_PEPTIDE_LENGTH: int = 20
     PREDICTION_THRESHOLD: float = 0.5
-    RANDOM_FOREST_TREES: int = 300
+
+    # Tree models: useful sweeps include 300/500 trees, depth 8/12/None,
+    # and leaf sizes 2/5/10/20.
+    RANDOM_FOREST_TREES: int = 300  # Also sets n_estimators for ExtraTrees.
+    TREE_MAX_DEPTH: int | None = None
+    TREE_MIN_SAMPLES_LEAF: int = 2
+    TREE_MIN_SAMPLES_SPLIT: int = 2
+    TREE_MAX_FEATURES: str | int | float | None = "sqrt"
+
+    # Linear/SVM: test C values 0.1/1/10; for SVM also compare gamma="scale".
+    CLASS_WEIGHT: str | None = "balanced"
+    LOGISTIC_REGRESSION_C: float = 1.0
+    LOGISTIC_REGRESSION_MAX_ITER: int = 2000
+    SVM_C: float = 1.0
+    SVM_GAMMA: str | float = "scale"
 
     def validate(self) -> None:
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
@@ -88,3 +102,59 @@ class CFG:
             raise ValueError("PREDICTION_THRESHOLD must be between 0 and 1.")
         if self.RANDOM_FOREST_TREES < 1:
             raise ValueError("RANDOM_FOREST_TREES must be positive.")
+        if self.TREE_MAX_DEPTH is not None and (
+            not isinstance(self.TREE_MAX_DEPTH, int)
+            or isinstance(self.TREE_MAX_DEPTH, bool)
+            or self.TREE_MAX_DEPTH < 1
+        ):
+            raise ValueError("TREE_MAX_DEPTH must be positive or None.")
+        if (
+            not isinstance(self.TREE_MIN_SAMPLES_LEAF, int)
+            or isinstance(self.TREE_MIN_SAMPLES_LEAF, bool)
+            or self.TREE_MIN_SAMPLES_LEAF < 1
+        ):
+            raise ValueError("TREE_MIN_SAMPLES_LEAF must be positive.")
+        if (
+            not isinstance(self.TREE_MIN_SAMPLES_SPLIT, int)
+            or isinstance(self.TREE_MIN_SAMPLES_SPLIT, bool)
+            or self.TREE_MIN_SAMPLES_SPLIT < 2
+        ):
+            raise ValueError("TREE_MIN_SAMPLES_SPLIT must be at least 2.")
+        if isinstance(self.TREE_MAX_FEATURES, float) and not (
+            0 < self.TREE_MAX_FEATURES <= 1
+        ):
+            raise ValueError("Float TREE_MAX_FEATURES must be in (0, 1].")
+        if isinstance(self.TREE_MAX_FEATURES, int) and self.TREE_MAX_FEATURES < 1:
+            raise ValueError("Integer TREE_MAX_FEATURES must be positive.")
+        if isinstance(self.TREE_MAX_FEATURES, str) and self.TREE_MAX_FEATURES not in {
+            "sqrt",
+            "log2",
+        }:
+            raise ValueError("TREE_MAX_FEATURES must be 'sqrt', 'log2', or None.")
+        if self.CLASS_WEIGHT not in {
+            None,
+            "balanced",
+            "balanced_subsample",
+        }:
+            raise ValueError(
+                "CLASS_WEIGHT must be 'balanced', 'balanced_subsample', or None."
+            )
+        if (
+            self.CLASS_WEIGHT == "balanced_subsample"
+            and self.MODEL_TYPE.lower() not in {"random_forest", "extra_trees"}
+        ):
+            raise ValueError(
+                "CLASS_WEIGHT='balanced_subsample' is only supported by tree models."
+            )
+        if self.LOGISTIC_REGRESSION_C <= 0:
+            raise ValueError("LOGISTIC_REGRESSION_C must be positive.")
+        if self.LOGISTIC_REGRESSION_MAX_ITER < 1:
+            raise ValueError("LOGISTIC_REGRESSION_MAX_ITER must be positive.")
+        if self.SVM_C <= 0:
+            raise ValueError("SVM_C must be positive.")
+        if not isinstance(self.SVM_GAMMA, (str, float, int)):
+            raise ValueError("SVM_GAMMA must be 'scale', 'auto', or a positive number.")
+        if isinstance(self.SVM_GAMMA, str) and self.SVM_GAMMA not in {"scale", "auto"}:
+            raise ValueError("SVM_GAMMA must be 'scale', 'auto', or a positive number.")
+        if isinstance(self.SVM_GAMMA, (float, int)) and self.SVM_GAMMA <= 0:
+            raise ValueError("Numeric SVM_GAMMA must be positive.")

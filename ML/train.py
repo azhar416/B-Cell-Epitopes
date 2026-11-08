@@ -256,6 +256,15 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         model_type=config.MODEL_TYPE,
         random_state=config.RANDOM_STATE,
         random_forest_trees=config.RANDOM_FOREST_TREES,
+        tree_max_depth=config.TREE_MAX_DEPTH,
+        tree_min_samples_leaf=config.TREE_MIN_SAMPLES_LEAF,
+        tree_min_samples_split=config.TREE_MIN_SAMPLES_SPLIT,
+        tree_max_features=config.TREE_MAX_FEATURES,
+        class_weight=config.CLASS_WEIGHT,
+        logistic_regression_c=config.LOGISTIC_REGRESSION_C,
+        logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
+        svm_c=config.SVM_C,
+        svm_gamma=config.SVM_GAMMA,
     )
     model.fit(fit_features, fit_labels)
 
@@ -503,6 +512,15 @@ def _run_training_single(
         model_type=config.MODEL_TYPE,
         random_state=config.RANDOM_STATE,
         random_forest_trees=config.RANDOM_FOREST_TREES,
+        tree_max_depth=config.TREE_MAX_DEPTH,
+        tree_min_samples_leaf=config.TREE_MIN_SAMPLES_LEAF,
+        tree_min_samples_split=config.TREE_MIN_SAMPLES_SPLIT,
+        tree_max_features=config.TREE_MAX_FEATURES,
+        class_weight=config.CLASS_WEIGHT,
+        logistic_regression_c=config.LOGISTIC_REGRESSION_C,
+        logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
+        svm_c=config.SVM_C,
+        svm_gamma=config.SVM_GAMMA,
     )
     model.fit(fit_features, fit_labels)
     train_probabilities = model.predict_proba(

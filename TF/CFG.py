@@ -23,8 +23,11 @@ class CFG:
 
         self.MODEL_TYPE = "esm2"  # choose "protbert", "esm2", or "prott5"
         self.CLASSIFIER_TYPE = "pooled_mlp"  # pooled_mlp, cnn, attention_pooling, bigru
-        self.CNN_CHANNELS = 128  # Set to "legacy" for max(16, hidden_size // 4).
+        self.CNN_CHANNELS = 128  # Try 32/64/128 for lower/higher CNN capacity.
         self.CNN_DROPOUT = 0.3
+        self.CLASSIFIER_HIDDEN_SIZE = None  # Try 128/256/512; None uses half the encoder width.
+        self.CLASSIFIER_DROPOUT = 0.5  # Try 0.3/0.5/0.7.
+        self.CROSS_ATTENTION_HEADS = 8
         self.FEATURE_FUSION = "cross_attention"  # choose one fusion: sequence_only, weighted_concat, cross_attention, se, gmu
         self.MSD_ENABLED = False  # Independent regularizer; enable only for an MSD experiment.
         self.MSD_SAMPLES = 5
@@ -67,6 +70,41 @@ class CFG:
         self.CHECKPOINT_PATH = str(
             PROJECT_ROOT / "DL" / "artifacts" / "protbert_classifier.pt"
         )
+
+    def validate(self):
+        if self.CLASSIFIER_TYPE.lower() not in {
+            "pooled_mlp",
+            "cnn",
+            "attention_pooling",
+            "bigru",
+        }:
+            raise ValueError(
+                "CLASSIFIER_TYPE must be pooled_mlp, cnn, attention_pooling, or bigru."
+            )
+        if self.CNN_CHANNELS != "legacy" and (
+            not isinstance(self.CNN_CHANNELS, int)
+            or isinstance(self.CNN_CHANNELS, bool)
+            or self.CNN_CHANNELS < 1
+        ):
+            raise ValueError("CNN_CHANNELS must be a positive integer or 'legacy'.")
+        if not 0 <= self.CNN_DROPOUT < 1:
+            raise ValueError("CNN_DROPOUT must be in [0, 1).")
+        if self.CLASSIFIER_HIDDEN_SIZE is not None and (
+            not isinstance(self.CLASSIFIER_HIDDEN_SIZE, int)
+            or isinstance(self.CLASSIFIER_HIDDEN_SIZE, bool)
+            or self.CLASSIFIER_HIDDEN_SIZE < 1
+        ):
+            raise ValueError(
+                "CLASSIFIER_HIDDEN_SIZE must be a positive integer or None."
+            )
+        if not 0 <= self.CLASSIFIER_DROPOUT < 1:
+            raise ValueError("CLASSIFIER_DROPOUT must be in [0, 1).")
+        if (
+            not isinstance(self.CROSS_ATTENTION_HEADS, int)
+            or isinstance(self.CROSS_ATTENTION_HEADS, bool)
+            or self.CROSS_ATTENTION_HEADS < 1
+        ):
+            raise ValueError("CROSS_ATTENTION_HEADS must be a positive integer.")
 
     @property
     def MODEL_NAME(self):

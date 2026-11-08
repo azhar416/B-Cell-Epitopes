@@ -189,6 +189,7 @@ def _make_loader(dataset, cfg, shuffle, device):
 
 
 def _build_model(cfg):
+    cfg.validate()
     model_classes = {
         "protbert": ProtBertForClassification,
         "esm2": ESM2ForClassification,
@@ -213,7 +214,10 @@ def _build_model(cfg):
         classifier_type=getattr(cfg, "CLASSIFIER_TYPE", "pooled_mlp"),
         cnn_channels=getattr(cfg, "CNN_CHANNELS", 128),
         cnn_dropout=getattr(cfg, "CNN_DROPOUT", 0.3),
+        classifier_hidden_size=getattr(cfg, "CLASSIFIER_HIDDEN_SIZE", None),
+        classifier_dropout=getattr(cfg, "CLASSIFIER_DROPOUT", 0.5),
         num_features=len(DESCRIPTOR_COLUMNS),
+        cross_attention_heads=getattr(cfg, "CROSS_ATTENTION_HEADS", 8),
         use_dipeptide_features=getattr(
             cfg,
             "USE_DIPEPTIDE_FEATURES",

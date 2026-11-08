@@ -65,6 +65,8 @@ class ProteinTransformerForClassification(nn.Module):
         classifier_type="pooled_mlp",
         cnn_channels=128,
         cnn_dropout=0.3,
+        classifier_hidden_size=None,
+        classifier_dropout=0.5,
         num_features=8,
         cross_attention_heads=8,
         msd_samples=1,
@@ -131,6 +133,12 @@ class ProteinTransformerForClassification(nn.Module):
                 "classifier_type must be 'pooled_mlp', 'cnn', "
                 "'attention_pooling', or 'bigru'."
             )
+        if classifier_hidden_size is None:
+            classifier_hidden_size = hidden_size // 2
+        if not isinstance(classifier_hidden_size, int) or classifier_hidden_size < 1:
+            raise ValueError("classifier_hidden_size must be a positive integer or None.")
+        if not 0 <= classifier_dropout < 1:
+            raise ValueError("classifier_dropout must be in the range [0, 1).")
         if self.classifier_type == "cnn":
             if cnn_channels == "legacy":
                 cnn_channels = max(16, hidden_size // 4)
@@ -226,11 +234,11 @@ class ProteinTransformerForClassification(nn.Module):
             classifier_input_size += hidden_size
 
         self.classifier_hidden = nn.Sequential(
-            nn.Dropout(p=0.5),
-            nn.Linear(classifier_input_size, hidden_size // 2),
+            nn.Dropout(p=classifier_dropout),
+            nn.Linear(classifier_input_size, classifier_hidden_size),
             nn.ReLU(),
         )
-        self.classifier_output = nn.Linear(hidden_size // 2, 1)
+        self.classifier_output = nn.Linear(classifier_hidden_size, 1)
 
     def forward(
         self,
