@@ -671,6 +671,7 @@ def _run_training_single(
 def run_training(config: CFG) -> dict[str, object]:
     """Run five-fold CV, grouping proteins except for peptide-level SARS folds."""
     config.validate()
+    config.OUTPUT_DIR = Path(config.OUTPUT_DIR)
     if config.TRAINING_MODE == "bcell_to_sars":
         sars_data = load_labeled_dataset(
             dataset_name="sars",

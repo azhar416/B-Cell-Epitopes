@@ -78,7 +78,9 @@ def _run_training_fold(
     dataset_output_dir = Path(config.OUTPUT_DIR) / config.DATASET_NAME
     model_output_dir = dataset_output_dir / config.MODEL_TYPE
     if fold_number is not None:
-        model_output_dir /= "cross_validation" / f"fold_{fold_number}"
+        model_output_dir = (
+            model_output_dir / "cross_validation" / f"fold_{fold_number}"
+        )
     model_output_dir.mkdir(parents=True, exist_ok=True)
     cache_path = dataset_output_dir / "prott5_embeddings.npz"
     embeddings = load_or_create_embeddings(
