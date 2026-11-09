@@ -1846,6 +1846,7 @@ def train_validation_split(
         ),
     }
     metrics_path = output_directory / "cross_validation_metrics.json"
+    report["metrics_path"] = str(metrics_path)
     metrics_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(
         f"5-fold CV complete ({split_strategy}); "
