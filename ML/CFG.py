@@ -118,16 +118,11 @@ class CFG:
         self.TRAINING_MODE = self.TRAINING_MODE.lower()
         if self.TRAINING_MODE not in {
             "same_dataset",
-            "bcell_to_sars",
             "external_sars",
         }:
             raise ValueError(
                 "TRAINING_MODE must be 'same_dataset' or 'external_sars'."
             )
-        # Keep the old option as a compatibility alias, but route it through
-        # the one-shot external evaluation rather than a SARS holdout.
-        if self.TRAINING_MODE == "bcell_to_sars":
-            self.TRAINING_MODE = "external_sars"
         if (
             self.TRAINING_MODE == "external_sars"
             and self.DATASET_NAME.lower() != "bcell"

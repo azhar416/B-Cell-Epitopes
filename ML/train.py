@@ -161,15 +161,6 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         prefix="external_sars_",
         title_prefix="External SARS",
     )
-    # Default plot filenames for compatibility
-    save_evaluation_plots(
-        sars_labels,
-        sars_scores,
-        threshold=selected_threshold,
-        output_dir=output_dir,
-        prefix="",
-        title_prefix="External SARS",
-    )
     overlap_report = {
         "unique_exact_peptide_sequences": len(overlap_sequences),
         "same_label": int(same_label_overlap),
@@ -577,7 +568,7 @@ def run_training(config: CFG) -> dict[str, object]:
     """Run five-fold CV, grouping proteins except for peptide-level SARS folds."""
     config.validate()
     config.OUTPUT_DIR = Path(config.OUTPUT_DIR)
-    if config.TRAINING_MODE in {"external_sars", "bcell_to_sars"}:
+    if config.TRAINING_MODE == "external_sars":
         return _run_external_sars(config)
 
     dataframe = load_labeled_dataset(
@@ -757,10 +748,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", choices=("bcell", "sars"))
     parser.add_argument(
         "--training-mode",
-        choices=("same_dataset", "bcell_to_sars", "external_sars"),
+        choices=("same_dataset", "external_sars"),
         help=(
             "Use internal dataset CV or train/select on B-cell only and "
-            "evaluate all cleaned SARS rows once. bcell_to_sars is a legacy alias."
+            "evaluate all cleaned SARS rows once."
         ),
     )
     parser.add_argument(
