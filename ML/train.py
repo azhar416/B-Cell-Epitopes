@@ -87,10 +87,8 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         )
     sars_features = sars_features.reindex(columns=development_features.columns)
 
-    selection, bcell_oof_scores, candidate_comparison = (
-        _select_external_model_from_bcell(
-            config, development_features, labels, groups
-        )
+    selection, candidate_comparison = _select_external_model_from_bcell(
+        config, development_features, labels, groups
     )
     final_config = copy.copy(config)
     for key, value in selection["parameters"].items():
@@ -169,21 +167,10 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     internal_oof_metrics_selected = calculate_metrics(
         internal_oof_labels, bcell_oof_scores, threshold=selected_threshold
     )
-    internal_fold_metrics = []
     internal_fold_metrics_selected = []
     for fold_number, fold_frame in internal_oof.groupby("fold", sort=True):
         fold_labels = fold_frame["target"].to_numpy(dtype=int)
         fold_scores = fold_frame["validation_probability"].to_numpy(dtype=float)
-        internal_fold_metrics.append(
-            {
-                "fold": int(fold_number),
-                **calculate_metrics(
-                    fold_labels,
-                    fold_scores,
-                    threshold=config.PREDICTION_THRESHOLD,
-                ),
-            }
-        )
         internal_fold_metrics_selected.append(
             {
                 "fold": int(fold_number),
@@ -192,6 +179,10 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
                 ),
             }
         )
+    internal_fold_metrics = [
+        {"fold": fold["fold"], **fold["validation_metrics"]}
+        for fold in internal_cv_report["fold_metrics"]
+    ]
 
     selected_metric_names = [
         key for key in internal_fold_metrics_selected[0] if key != "fold"
@@ -275,7 +266,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "average_precision"
             if config.HYPERPARAMETER_TUNING_METRIC == "pr_auc"
             else config.HYPERPARAMETER_TUNING_METRIC
-        ),
+        )
+        if config.HYPERPARAMETER_TUNING
+        else None,
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
         "feature_columns": development_features.columns.tolist(),

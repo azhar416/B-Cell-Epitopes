@@ -4,7 +4,6 @@ import copy
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import matthews_corrcoef
 
 from ML.CFG import CFG
 from ML.dataset import make_cross_validation_splits
@@ -160,8 +159,28 @@ def _select_external_model_from_bcell(
     features: pd.DataFrame,
     labels: np.ndarray,
     groups: np.ndarray,
-) -> tuple[dict[str, object], np.ndarray, list[dict[str, object]]]:
-    """Select model parameters, compute internal 5-fold CV metrics, and choose decision threshold on B-cell."""
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Select external-model parameters by pooled B-cell out-of-fold score."""
+    base_parameters = _configured_model_parameters(config)
+    if not config.HYPERPARAMETER_TUNING:
+        return (
+            {
+                "parameters": base_parameters,
+                "selection_metric": None,
+                "selection_score": None,
+                "candidate_count": 1,
+            },
+            [
+                {
+                    "candidate_id": 0,
+                    "parameters": base_parameters,
+                    "selection_metric": None,
+                    "selection_score": None,
+                    "selected": True,
+                }
+            ],
+        )
+
     folds, _ = make_cross_validation_splits(
         labels,
         groups,
@@ -169,12 +188,7 @@ def _select_external_model_from_bcell(
         n_splits=5,
         random_state=config.RANDOM_STATE,
     )
-    base_parameters = _configured_model_parameters(config)
-    overrides = (
-        config.HYPERPARAMETER_TUNING_CANDIDATES.get(config.MODEL_TYPE, [])
-        if config.HYPERPARAMETER_TUNING
-        else []
-    )
+    overrides = config.HYPERPARAMETER_TUNING_CANDIDATES.get(config.MODEL_TYPE, [])
     candidates = [base_parameters]
     candidates.extend(
         {**base_parameters, **override} for override in overrides
@@ -189,8 +203,7 @@ def _select_external_model_from_bcell(
         candidate_config.validate()
 
         oof_scores = np.full(len(labels), np.nan, dtype=float)
-        fold_metrics_list = []
-        for fold_number, (train_indices, validation_indices) in enumerate(folds, 1):
+        for train_indices, validation_indices in folds:
             fit_features, fit_labels, _ = smote_resample(
                 features.iloc[train_indices],
                 labels[train_indices],
@@ -204,31 +217,12 @@ def _select_external_model_from_bcell(
                 features.iloc[validation_indices]
             )[:, 1]
             oof_scores[validation_indices] = val_scores
-            fold_metrics = calculate_metrics(
-                labels[validation_indices],
-                val_scores,
-                threshold=config.PREDICTION_THRESHOLD,
-            )
-            fold_metrics_list.append({"fold": fold_number, **fold_metrics})
 
         oof_metrics = calculate_metrics(
             labels,
             oof_scores,
             threshold=config.PREDICTION_THRESHOLD,
         )
-        numeric_metric_names = [
-            key
-            for key, val in fold_metrics_list[0].items()
-            if isinstance(val, (int, float)) and key != "fold"
-        ]
-        mean_fold_metrics = {
-            metric: float(np.mean([f[metric] for f in fold_metrics_list]))
-            for metric in numeric_metric_names
-        }
-        std_fold_metrics = {
-            metric: float(np.std([f[metric] for f in fold_metrics_list]))
-            for metric in numeric_metric_names
-        }
         selection_metric = config.HYPERPARAMETER_TUNING_METRIC
         score = float(oof_metrics[selection_metric])
         candidate_results.append(
@@ -237,52 +231,11 @@ def _select_external_model_from_bcell(
                 "parameters": parameters,
                 "selection_metric": selection_metric,
                 "selection_score": score,
-                "oof_scores": oof_scores,
                 "oof_metrics": oof_metrics,
-                "fold_metrics": fold_metrics_list,
-                "mean_fold_metrics": mean_fold_metrics,
-                "std_fold_metrics": std_fold_metrics,
             }
         )
 
     selected = max(candidate_results, key=lambda result: result["selection_score"])
-    threshold_values = np.unique(np.r_[0.0, selected["oof_scores"], 1.0])
-    threshold_mcc = [
-        matthews_corrcoef(labels, selected["oof_scores"] >= value)
-        for value in threshold_values
-    ]
-    best_mcc = max(threshold_mcc)
-    tied_thresholds = [
-        float(value)
-        for value, score in zip(threshold_values, threshold_mcc)
-        if np.isclose(score, best_mcc)
-    ]
-    selected_threshold = min(tied_thresholds, key=lambda value: abs(value - 0.5))
-
-    oof_metrics_at_selected = calculate_metrics(
-        labels,
-        selected["oof_scores"],
-        threshold=selected_threshold,
-    )
-    fold_metrics_selected_threshold = []
-    for fold_report in selected["fold_metrics"]:
-        fold_idx = fold_report["fold"]
-        val_idx = folds[fold_idx - 1][1]
-        val_fold_metrics = calculate_metrics(
-            labels[val_idx],
-            selected["oof_scores"][val_idx],
-            threshold=selected_threshold,
-        )
-        fold_metrics_selected_threshold.append({"fold": fold_idx, **val_fold_metrics})
-    mean_fold_metrics_selected = {
-        metric: float(np.mean([f[metric] for f in fold_metrics_selected_threshold]))
-        for metric in numeric_metric_names
-    }
-    std_fold_metrics_selected = {
-        metric: float(np.std([f[metric] for f in fold_metrics_selected_threshold]))
-        for metric in numeric_metric_names
-    }
-
     comparison = [
         {
             "candidate_id": result["candidate_id"],
@@ -301,16 +254,6 @@ def _select_external_model_from_bcell(
         "parameters": selected["parameters"],
         "selection_metric": selected["selection_metric"],
         "selection_score": selected["selection_score"],
-        "oof_metrics_at_configured_threshold": selected["oof_metrics"],
-        "oof_metrics_at_selected_threshold": oof_metrics_at_selected,
-        "selected_threshold_from_bcell_oof_mcc": selected_threshold,
-        "threshold_selection_mcc": float(best_mcc),
         "candidate_count": len(candidates),
-        "fold_metrics": selected["fold_metrics"],
-        "mean_fold_metrics": selected["mean_fold_metrics"],
-        "std_fold_metrics": selected["std_fold_metrics"],
-        "fold_metrics_at_selected_threshold": fold_metrics_selected_threshold,
-        "mean_fold_metrics_at_selected_threshold": mean_fold_metrics_selected,
-        "std_fold_metrics_at_selected_threshold": std_fold_metrics_selected,
     }
-    return selection, selected["oof_scores"], comparison
+    return selection, comparison
