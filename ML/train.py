@@ -65,15 +65,14 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     )
     conflicting_label_overlap = len(overlap_sequences) - same_label_overlap
 
-    # Keep every SARS peptide for the final score, but remove identical peptide
-    # sequences from model development to avoid exact-sequence leakage.
-    development = bcell.loc[~overlap_mask].reset_index(drop=True)
+    # Retain the complete cleaned B-cell dataset, including exact peptide
+    # overlaps with SARS, for both internal selection and the final refit.
+    development = bcell.reset_index(drop=True)
     labels = development["target"].to_numpy(dtype=int)
     groups = development["parent_protein_id"].astype(str).to_numpy()
     if np.unique(labels).size != 2:
         raise ValueError(
-            "Removing B-cell/SARS sequence overlaps left only one class in the "
-            "B-cell development set."
+            "The cleaned B-cell development set must contain both classes."
         )
 
     development_features = _build_configured_features(development, config)
@@ -165,7 +164,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "unique_exact_peptide_sequences": len(overlap_sequences),
         "same_label": int(same_label_overlap),
         "opposite_label": int(conflicting_label_overlap),
-        "bcell_rows_excluded_from_development": int(overlap_mask.sum()),
+        "bcell_rows_retained_in_development": int(overlap_mask.sum()),
         "sars_rows_retained_for_external_evaluation": int(len(sars)),
     }
     report: dict[str, object] = {
@@ -183,7 +182,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
         "feature_columns": development_features.columns.tolist(),
-        "bcell_rows_before_overlap_exclusion": int(len(bcell)),
+        "bcell_rows_before_overlap_handling": int(len(bcell)),
         "bcell_rows_used_for_development": int(len(development)),
         "bcell_proteins_used_for_development": int(development.parent_protein_id.nunique()),
         "bcell_class_counts_used_for_development": pd.Series(labels).value_counts().sort_index().to_dict(),
@@ -191,6 +190,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "external_sars_proteins": int(sars.parent_protein_id.nunique()),
         "external_sars_class_counts": pd.Series(sars_labels).value_counts().sort_index().to_dict(),
         "exact_sequence_overlap_audit": overlap_report,
+        "exact_sequence_overlap_handling": (
+            "All cleaned B-cell rows are retained for internal selection and "
+            "final training. Exact peptide overlaps also remain in external "
+            "SARS evaluation, so those rows are not an independent test."
+        ),
         "internal_bcell_cv": {
             "protocol": "5-fold StratifiedGroupKFold on B-cell, grouped by parent_protein_id",
             "folds": selection["fold_metrics"],
@@ -231,7 +235,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "artifact_directory": str(output_dir),
         "interpretation_limit": (
             "The cleaned SARS dataset contains one parent protein; this is a "
-            "single-protein external evaluation, not broad unseen-protein validation."
+            "single-protein external evaluation, not broad unseen-protein validation. "
+            "Exact B-cell/SARS peptide overlaps are retained, so overlap rows "
+            "may have optimistic or conflicting-label results."
         ),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
@@ -257,7 +263,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "training_dataset": "bcell",
         "external_evaluation_dataset": "sars",
         "selected_hyperparameters": selection["parameters"],
-        "exact_overlap_sequences_excluded_from_training": len(overlap_sequences),
+        "exact_overlap_sequences_retained_in_training": len(overlap_sequences),
     }
     dump(bundle, output_dir / "peptide_classifier.joblib")
 
@@ -294,7 +300,8 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     print(
         f"External SARS evaluation complete: {len(sars):,} peptides from "
         f"{sars.parent_protein_id.nunique():,} protein(s); "
-        f"excluded {len(overlap_sequences):,} exact B-cell/SARS peptide overlaps from training."
+        f"retained {int(overlap_mask.sum()):,} B-cell rows with "
+        f"{len(overlap_sequences):,} exact SARS peptide overlaps in development."
     )
     print(f"Saved experiment artifacts to: {output_dir}")
     return report
