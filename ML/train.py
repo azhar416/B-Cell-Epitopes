@@ -109,19 +109,116 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     final_model.fit(fit_features, fit_labels)
     sars_scores = final_model.predict_proba(sars_features)[:, 1]
     sars_labels = sars["target"].to_numpy(dtype=int)
-    selected_threshold = float(selection["selected_threshold_from_bcell_oof_mcc"])
-
     output_dir = config.OUTPUT_DIR / config.FEATURE_SET / "external_sars"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the exact same internal-CV runner and aggregation as same_dataset.
+    # External model selection above remains separate because it chooses the
+    # final model to refit on all B-cell rows.
+    internal_cv_config = copy.copy(config)
+    internal_cv_config.TRAINING_MODE = "same_dataset"
+    internal_cv_config.DATASET_NAME = "bcell"
+    internal_cv_config.OUTPUT_DIR = output_dir / "internal_bcell_same_dataset"
+    internal_cv_report = run_training(internal_cv_config)
+    internal_oof = pd.read_csv(internal_cv_report["out_of_fold_predictions"])
+    internal_oof = development[
+        ["peptide_seq", "target", "parent_protein_id"]
+    ].merge(
+        internal_oof[
+            [
+                "peptide_seq",
+                "target",
+                "parent_protein_id",
+                "validation_probability",
+                "fold",
+            ]
+        ],
+        on=["peptide_seq", "target", "parent_protein_id"],
+        how="left",
+        validate="one_to_one",
+        sort=False,
+    )
+    if internal_oof["validation_probability"].isna().any():
+        raise RuntimeError(
+            "The same_dataset internal CV did not produce one OOF score for "
+            "every cleaned B-cell peptide."
+        )
+    bcell_oof_scores = internal_oof["validation_probability"].to_numpy(dtype=float)
+    internal_oof_labels = internal_oof["target"].to_numpy(dtype=int)
+    internal_oof_metrics = internal_cv_report["validation_metrics"]
+    internal_oof_metrics_at_05 = calculate_metrics(
+        internal_oof_labels, bcell_oof_scores, threshold=0.5
+    )
+
+    # Select the deployment threshold from the same-dataset OOF predictions.
+    # This keeps the threshold and the reported internal predictions aligned.
+    threshold_values = np.unique(np.r_[0.0, bcell_oof_scores, 1.0])
+    threshold_mcc = [
+        calculate_metrics(
+            internal_oof_labels, bcell_oof_scores, threshold=float(value)
+        )["mcc"]
+        for value in threshold_values
+    ]
+    best_mcc = max(threshold_mcc)
+    tied_thresholds = [
+        float(value)
+        for value, score in zip(threshold_values, threshold_mcc)
+        if np.isclose(score, best_mcc)
+    ]
+    selected_threshold = min(tied_thresholds, key=lambda value: abs(value - 0.5))
+    internal_oof_metrics_selected = calculate_metrics(
+        internal_oof_labels, bcell_oof_scores, threshold=selected_threshold
+    )
+    internal_fold_metrics = []
+    internal_fold_metrics_selected = []
+    for fold_number, fold_frame in internal_oof.groupby("fold", sort=True):
+        fold_labels = fold_frame["target"].to_numpy(dtype=int)
+        fold_scores = fold_frame["validation_probability"].to_numpy(dtype=float)
+        internal_fold_metrics.append(
+            {
+                "fold": int(fold_number),
+                **calculate_metrics(
+                    fold_labels,
+                    fold_scores,
+                    threshold=config.PREDICTION_THRESHOLD,
+                ),
+            }
+        )
+        internal_fold_metrics_selected.append(
+            {
+                "fold": int(fold_number),
+                **calculate_metrics(
+                    fold_labels, fold_scores, threshold=selected_threshold
+                ),
+            }
+        )
+
+    selected_metric_names = [
+        key for key in internal_fold_metrics_selected[0] if key != "fold"
+    ]
+    internal_mean_metrics_selected = {
+        metric: float(
+            np.mean([fold[metric] for fold in internal_fold_metrics_selected])
+        )
+        for metric in selected_metric_names
+    }
+    internal_std_metrics_selected = {
+        metric: float(
+            np.std([fold[metric] for fold in internal_fold_metrics_selected])
+        )
+        for metric in selected_metric_names
+    }
+
     pd.DataFrame(
         {
-            "peptide_seq": development["peptide_seq"],
-            "target": labels,
-            "parent_protein_id": groups,
+            "peptide_seq": internal_oof["peptide_seq"],
+            "target": internal_oof["target"],
+            "parent_protein_id": internal_oof["parent_protein_id"],
             "bcell_oof_probability": bcell_oof_scores,
+            "fold": internal_oof["fold"],
         }
     ).to_csv(output_dir / "bcell_oof_predictions.csv", index=False)
-    pd.DataFrame(selection["fold_metrics"]).to_csv(
+    pd.DataFrame(internal_fold_metrics).to_csv(
         output_dir / "bcell_fold_metrics.csv", index=False
     )
     pd.DataFrame(candidate_comparison).assign(
@@ -196,17 +293,19 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "SARS evaluation, so those rows are not an independent test."
         ),
         "internal_bcell_cv": {
-            "protocol": "5-fold StratifiedGroupKFold on B-cell, grouped by parent_protein_id",
-            "folds": selection["fold_metrics"],
-            "mean_metrics": selection["mean_fold_metrics"],
-            "std_metrics": selection["std_fold_metrics"],
-            "folds_at_selected_threshold": selection["fold_metrics_at_selected_threshold"],
-            "mean_metrics_at_selected_threshold": selection["mean_fold_metrics_at_selected_threshold"],
-            "std_metrics_at_selected_threshold": selection["std_fold_metrics_at_selected_threshold"],
-            "oof_metrics_threshold_0_5": selection["oof_metrics_at_configured_threshold"],
-            "oof_metrics_bcell_selected_threshold": selection["oof_metrics_at_selected_threshold"],
+            "protocol": internal_cv_report["validation_metrics_interpretation"],
+            "folds": internal_fold_metrics,
+            "mean_metrics": internal_cv_report["mean_validation_metrics"],
+            "std_metrics": internal_cv_report["std_validation_metrics"],
+            "folds_at_selected_threshold": internal_fold_metrics_selected,
+            "mean_metrics_at_selected_threshold": internal_mean_metrics_selected,
+            "std_metrics_at_selected_threshold": internal_std_metrics_selected,
+            "oof_metrics_threshold_configured": internal_oof_metrics,
+            "oof_metrics_threshold_0_5": internal_oof_metrics_at_05,
+            "oof_metrics_bcell_selected_threshold": internal_oof_metrics_selected,
+            "configured_threshold": config.PREDICTION_THRESHOLD,
             "selected_threshold": selected_threshold,
-            "threshold_selection_mcc": selection["threshold_selection_mcc"],
+            "threshold_selection_mcc": float(best_mcc),
             "fold_metrics_path": str(output_dir / "bcell_fold_metrics.csv"),
             "predictions_path": str(output_dir / "bcell_oof_predictions.csv"),
             "evaluation_plots": bcell_plots,
@@ -221,13 +320,22 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "predictions_path": str(output_dir / "external_sars_predictions.csv"),
             "evaluation_plots": sars_plots,
         },
-        "model_selection": selection,
+        "model_selection": {
+            "parameters": selection["parameters"],
+            "selection_metric": selection["selection_metric"],
+            "selection_score": selection["selection_score"],
+            "candidate_count": selection["candidate_count"],
+            "candidate_comparison_path": str(
+                output_dir / "bcell_model_selection.csv"
+            ),
+        },
         "resampling": {
             "method": "SMOTE" if config.USE_SMOTE else "none",
             "scope": "B-cell training folds and final B-cell refit only",
             "synthetic_rows_final_refit": int(synthetic_count),
         },
         "class_weight": config.CLASS_WEIGHT,
+        "prediction_threshold": selected_threshold,
         "external_sars_metrics_threshold_0_5": metrics_at_05,
         "external_sars_metrics_bcell_selected_threshold": metrics_at_selected,
         "evaluation_plots": sars_plots,
@@ -287,9 +395,13 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         ("mcc", "MCC"),
     ]
     for metric_key, metric_name in summary_metrics:
-        bcell_mean = selection["mean_fold_metrics"].get(metric_key, 0.0)
-        bcell_std = selection["std_fold_metrics"].get(metric_key, 0.0)
-        bcell_oof = selection["oof_metrics_at_configured_threshold"].get(metric_key, 0.0)
+        bcell_mean = internal_cv_report["mean_validation_metrics"].get(
+            metric_key, 0.0
+        )
+        bcell_std = internal_cv_report["std_validation_metrics"].get(
+            metric_key, 0.0
+        )
+        bcell_oof = internal_oof_metrics.get(metric_key, 0.0)
         sars_05 = metrics_at_05.get(metric_key, 0.0)
         sars_sel = metrics_at_selected.get(metric_key, 0.0)
         print(
