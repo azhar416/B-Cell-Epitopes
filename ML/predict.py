@@ -75,11 +75,11 @@ def predict_peptides(
             input_frame[column] = descriptor_data[column].to_numpy()
 
     if feature_profile == "perbandingan_1":
-        required_columns = {"protein_seq"}
+        required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
             raise ValueError(
                 "A perbandingan_1 model needs protein_context_data containing "
-                "protein_seq so it can calculate protein length."
+                "protein_seq, start_position, and end_position."
             )
         missing = required_columns.difference(protein_context_data.columns)
         if missing:
@@ -91,7 +91,29 @@ def predict_peptides(
             raise ValueError(
                 "protein_context_data must have one row per peptide sequence."
             )
-        input_frame["protein_seq"] = protein_context_data["protein_seq"].to_numpy()
+        for column in required_columns:
+            input_frame[column] = protein_context_data[column].to_numpy()
+        required_descriptors = set(feature_names).intersection(DESCRIPTOR_COLUMNS)
+        if required_descriptors:
+            if descriptor_data is None:
+                raise ValueError(
+                    "A perbandingan_1 model needs descriptor_data containing: "
+                    f"{sorted(required_descriptors)}."
+                )
+            missing_descriptors = required_descriptors.difference(
+                descriptor_data.columns
+            )
+            if missing_descriptors:
+                raise ValueError(
+                    "descriptor_data is missing required columns: "
+                    f"{sorted(missing_descriptors)}."
+                )
+            if len(descriptor_data) != len(input_frame):
+                raise ValueError(
+                    "descriptor_data must have one row per peptide sequence."
+                )
+            for column in required_descriptors:
+                input_frame[column] = descriptor_data[column].to_numpy()
     elif use_protein_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:

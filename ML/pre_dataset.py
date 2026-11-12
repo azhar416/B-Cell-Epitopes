@@ -44,7 +44,7 @@ def build_feature_frame(
     sequence_column: str = "peptide_seq",
     feature_set: str = "proposed",
 ) -> pd.DataFrame:
-    """Build either the length-only comparison or the proposed feature set."""
+    """Build the paper-based comparison profile or the proposed feature set."""
     if not isinstance(feature_set, str):
         raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
     feature_set = feature_set.strip().lower().replace(" ", "_")
@@ -52,7 +52,13 @@ def build_feature_frame(
         raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
 
     if feature_set == "perbandingan_1":
-        required_columns = {sequence_column, "protein_seq"}
+        required_columns = {
+            sequence_column,
+            "protein_seq",
+            "start_position",
+            "end_position",
+            *DESCRIPTOR_COLUMNS,
+        }
         missing_columns = required_columns.difference(dataframe.columns)
         if missing_columns:
             raise ValueError(
@@ -67,13 +73,30 @@ def build_feature_frame(
             normalize_sequence(value, row_label=index)
             for index, value in dataframe["protein_seq"].items()
         ]
-        return pd.DataFrame(
+        start_positions = pd.to_numeric(dataframe["start_position"], errors="raise")
+        end_positions = pd.to_numeric(dataframe["end_position"], errors="raise")
+        if start_positions.isna().any() or end_positions.isna().any():
+            raise ValueError("Protein start/end positions must not be missing.")
+        if (end_positions < start_positions).any():
+            raise ValueError("Protein end_position must be >= start_position.")
+
+        features = pd.DataFrame(
             {
                 "peptide_length": [len(sequence) for sequence in peptide_sequences],
                 "protein_length": [len(sequence) for sequence in protein_sequences],
+                "position": (end_positions - start_positions + 1).astype(float),
             },
             index=dataframe.index,
         )
+        for column in DESCRIPTOR_COLUMNS:
+            values = pd.to_numeric(dataframe[column], errors="coerce")
+            # The paper removed descriptors that were constant in SARS-CoV.
+            if values.nunique(dropna=True) > 1:
+                features[column] = values
+        # A source protein shared by every row has no informative length feature.
+        if features["protein_length"].nunique() <= 1:
+            features = features.drop(columns="protein_length")
+        return features
 
     for name, enabled in (
         ("use_peptide_features", use_peptide_features),
