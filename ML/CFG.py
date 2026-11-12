@@ -15,6 +15,7 @@ class CFG:
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
     TRAINING_MODE: str = "same_dataset"
+    FEATURE_SET: str = "proposed"
     USE_PEPTIDE_FEATURES: bool = False
     USE_PROTEIN_FEATURES: bool = False
     USE_BIOLOGICAL_FEATURES: bool = True
@@ -73,6 +74,11 @@ class CFG:
     )
 
     def validate(self) -> None:
+        if not isinstance(self.FEATURE_SET, str):
+            raise ValueError("FEATURE_SET must be 'perbandingan_1' or 'proposed'.")
+        self.FEATURE_SET = self.FEATURE_SET.strip().lower().replace(" ", "_")
+        if self.FEATURE_SET not in {"perbandingan_1", "proposed"}:
+            raise ValueError("FEATURE_SET must be 'perbandingan_1' or 'proposed'.")
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
             raise ValueError("DATASET_NAME must be either 'bcell' or 'sars'.")
         if self.MODEL_TYPE.lower() not in {
@@ -105,18 +111,19 @@ class CFG:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
-        if self.USE_PROTEIN_FEATURES and not self.USE_PEPTIDE_FEATURES:
-            raise ValueError(
-                "USE_PROTEIN_FEATURES=True requires USE_PEPTIDE_FEATURES=True."
-            )
-        if not any(
-            (
-                self.USE_PEPTIDE_FEATURES,
-                self.USE_PROTEIN_FEATURES,
-                self.USE_BIOLOGICAL_FEATURES,
-            )
-        ):
-            raise ValueError("At least one feature group must be enabled.")
+        if self.FEATURE_SET == "proposed":
+            if self.USE_PROTEIN_FEATURES and not self.USE_PEPTIDE_FEATURES:
+                raise ValueError(
+                    "USE_PROTEIN_FEATURES=True requires USE_PEPTIDE_FEATURES=True."
+                )
+            if not any(
+                (
+                    self.USE_PEPTIDE_FEATURES,
+                    self.USE_PROTEIN_FEATURES,
+                    self.USE_BIOLOGICAL_FEATURES,
+                )
+            ):
+                raise ValueError("At least one feature group must be enabled.")
         if not isinstance(self.PEPTIDE_FEATURE_TYPE, str):
             raise ValueError("PEPTIDE_FEATURE_TYPE must be a string.")
         if self.PEPTIDE_FEATURE_TYPE.lower() not in {"aac", "aac_dipeptide"}:

@@ -23,6 +23,7 @@ def predict_peptides(
 
     bundle = load(model_path)
     feature_names = bundle["feature_names"]
+    feature_profile = bundle.get("feature_profile", "proposed")
     legacy_feature_set = bundle.get("feature_set")
     use_protein_features = bool(
         bundle.get(
@@ -46,6 +47,10 @@ def predict_peptides(
             or any(name in DESCRIPTOR_COLUMNS for name in feature_names),
         )
     )
+    if feature_profile == "perbandingan_1":
+        use_peptide_features = False
+        use_protein_features = False
+        use_biological_features = False
     peptide_feature_type = bundle.get(
         "peptide_feature_type",
         legacy_feature_set
@@ -69,7 +74,25 @@ def predict_peptides(
         for column in DESCRIPTOR_COLUMNS:
             input_frame[column] = descriptor_data[column].to_numpy()
 
-    if use_protein_features:
+    if feature_profile == "perbandingan_1":
+        required_columns = {"protein_seq"}
+        if protein_context_data is None:
+            raise ValueError(
+                "A perbandingan_1 model needs protein_context_data containing "
+                "protein_seq so it can calculate protein length."
+            )
+        missing = required_columns.difference(protein_context_data.columns)
+        if missing:
+            raise ValueError(
+                "protein_context_data is missing required columns: "
+                f"{sorted(missing)}."
+            )
+        if len(protein_context_data) != len(input_frame):
+            raise ValueError(
+                "protein_context_data must have one row per peptide sequence."
+            )
+        input_frame["protein_seq"] = protein_context_data["protein_seq"].to_numpy()
+    elif use_protein_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
             raise ValueError(
@@ -96,6 +119,7 @@ def predict_peptides(
         use_protein_features=use_protein_features,
         use_biological_features=use_biological_features,
         peptide_feature_type=peptide_feature_type,
+        feature_set=feature_profile,
     ).reindex(columns=feature_names)
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])

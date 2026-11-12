@@ -42,8 +42,39 @@ def build_feature_frame(
     use_biological_features: bool = True,
     peptide_feature_type: str = "aac",
     sequence_column: str = "peptide_seq",
+    feature_set: str = "proposed",
 ) -> pd.DataFrame:
-    """Build selected peptide, protein, and biological feature groups."""
+    """Build either the length-only comparison or the proposed feature set."""
+    if not isinstance(feature_set, str):
+        raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
+    feature_set = feature_set.strip().lower().replace(" ", "_")
+    if feature_set not in {"perbandingan_1", "proposed"}:
+        raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
+
+    if feature_set == "perbandingan_1":
+        required_columns = {sequence_column, "protein_seq"}
+        missing_columns = required_columns.difference(dataframe.columns)
+        if missing_columns:
+            raise ValueError(
+                "The perbandingan_1 feature set requires columns: "
+                f"{sorted(missing_columns)}."
+            )
+        peptide_sequences = [
+            normalize_sequence(value, row_label=index)
+            for index, value in dataframe[sequence_column].items()
+        ]
+        protein_sequences = [
+            normalize_sequence(value, row_label=index)
+            for index, value in dataframe["protein_seq"].items()
+        ]
+        return pd.DataFrame(
+            {
+                "peptide_length": [len(sequence) for sequence in peptide_sequences],
+                "protein_length": [len(sequence) for sequence in protein_sequences],
+            },
+            index=dataframe.index,
+        )
+
     for name, enabled in (
         ("use_peptide_features", use_peptide_features),
         ("use_protein_features", use_protein_features),

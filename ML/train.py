@@ -41,10 +41,18 @@ def calculate_metrics(
     probabilities: np.ndarray,
     threshold: float,
 ) -> dict[str, float | int]:
-    """Calculate threshold-dependent and threshold-independent binary metrics."""
+    """Calculate overall and per-class binary metrics.
+
+    Per-class accuracy is the fraction of actual members of that class
+    classified correctly, so it is equal to that class's recall.
+    """
     predictions = (probabilities >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(labels, predictions, labels=[0, 1]).ravel()
-    return {
+    class_counts = {
+        0: (int(tn), int(fn), int(fp), int(tn + fp)),
+        1: (int(tp), int(fp), int(fn), int(tp + fn)),
+    }
+    metrics: dict[str, float | int] = {
         "roc_auc": float(roc_auc_score(labels, probabilities)),
         "pr_auc": float(average_precision_score(labels, probabilities)),
         "accuracy": float(accuracy_score(labels, predictions)),
@@ -58,6 +66,23 @@ def calculate_metrics(
         "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
         "mcc": float(matthews_corrcoef(labels, predictions)),
     }
+    for class_label, (class_tp, class_fp, class_fn, support) in class_counts.items():
+        class_precision = class_tp / (class_tp + class_fp) if class_tp + class_fp else 0.0
+        class_recall = class_tp / support if support else 0.0
+        class_f1 = (
+            2 * class_precision * class_recall / (class_precision + class_recall)
+            if class_precision + class_recall
+            else 0.0
+        )
+        metrics.update(
+            {
+                f"class_{class_label}_accuracy": float(class_recall),
+                f"class_{class_label}_precision": float(class_precision),
+                f"class_{class_label}_recall": float(class_recall),
+                f"class_{class_label}_f1": float(class_f1),
+            }
+        )
+    return metrics
 
 
 def _build_configured_model(config: CFG):
@@ -338,6 +363,7 @@ def _build_configured_features(dataframe: pd.DataFrame, config: CFG) -> pd.DataF
         use_protein_features=config.USE_PROTEIN_FEATURES,
         use_biological_features=config.USE_BIOLOGICAL_FEATURES,
         peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
+        feature_set=config.FEATURE_SET,
     )
 
 
@@ -471,6 +497,7 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
     bundle = {
         "model": model,
         "feature_names": bcell_features.columns.tolist(),
+        "feature_profile": config.FEATURE_SET,
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
@@ -493,6 +520,8 @@ def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
         "evaluation_dataset": "sars",
         "training_mode": config.TRAINING_MODE,
         "model": config.MODEL_TYPE,
+        "feature_set": config.FEATURE_SET,
+        "class_labels": {"0": "negative", "1": "positive"},
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
@@ -624,13 +653,7 @@ def _run_training_single(
         data_dir=config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
     )
-    feature_frame = build_feature_frame(
-        dataframe,
-        use_peptide_features=config.USE_PEPTIDE_FEATURES,
-        use_protein_features=config.USE_PROTEIN_FEATURES,
-        use_biological_features=config.USE_BIOLOGICAL_FEATURES,
-        peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
-    )
+    feature_frame = _build_configured_features(dataframe, config)
     labels = dataframe["target"].to_numpy(dtype=int)
     if supplied_split is not None:
         train_indices, validation_indices = supplied_split
@@ -766,6 +789,7 @@ def _run_training_single(
     bundle = {
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
+        "feature_profile": config.FEATURE_SET,
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
@@ -786,6 +810,8 @@ def _run_training_single(
         "dataset": config.DATASET_NAME,
         "training_mode": config.TRAINING_MODE,
         "model": config.MODEL_TYPE,
+        "feature_set": config.FEATURE_SET,
+        "class_labels": {"0": "negative", "1": "positive"},
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
@@ -891,7 +917,8 @@ def run_training(config: CFG) -> dict[str, object]:
             n_splits=5,
             random_state=config.RANDOM_STATE,
         )
-        summary_dir = config.OUTPUT_DIR / "bcell_to_sars" / "cross_validation"
+        profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
+        summary_dir = profile_output_dir / "bcell_to_sars" / "cross_validation"
     else:
         dataframe = load_labeled_dataset(
             dataset_name=config.DATASET_NAME,
@@ -905,7 +932,8 @@ def run_training(config: CFG) -> dict[str, object]:
             n_splits=5,
             random_state=config.RANDOM_STATE,
         )
-        summary_dir = config.OUTPUT_DIR / "cross_validation"
+        profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
+        summary_dir = profile_output_dir / "cross_validation"
 
     fold_reports = []
     for fold_number, fold_split in enumerate(folds, 1):
@@ -913,7 +941,7 @@ def run_training(config: CFG) -> dict[str, object]:
         fold_config.OUTPUT_DIR = (
             summary_dir.parent / f"fold_{fold_number}"
             if config.TRAINING_MODE == "bcell_to_sars"
-            else config.OUTPUT_DIR / "cross_validation" / f"fold_{fold_number}"
+            else profile_output_dir / "cross_validation" / f"fold_{fold_number}"
         )
         fold_config._CV_FOLD_NUMBER = fold_number
         if config.TRAINING_MODE == "bcell_to_sars":
@@ -996,6 +1024,8 @@ def run_training(config: CFG) -> dict[str, object]:
         "dataset": config.DATASET_NAME,
         "training_mode": config.TRAINING_MODE,
         "model": config.MODEL_TYPE,
+        "feature_set": config.FEATURE_SET,
+        "class_labels": {"0": "negative", "1": "positive"},
         "split_strategy": split_strategy,
         "n_splits": 5,
         "fold_metrics": [
@@ -1084,6 +1114,14 @@ def parse_args() -> argparse.Namespace:
         choices=("logistic_regression", "random_forest", "extra_trees", "svm"),
     )
     parser.add_argument(
+        "--feature-set",
+        choices=("perbandingan_1", "proposed"),
+        help=(
+            "Select length-only peptide/protein features from the paper, or "
+            "the current proposed feature engineering."
+        ),
+    )
+    parser.add_argument(
         "--peptide-features",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1120,6 +1158,8 @@ def main() -> None:
         config.TRAINING_MODE = args.training_mode
     if args.model:
         config.MODEL_TYPE = args.model
+    if args.feature_set:
+        config.FEATURE_SET = args.feature_set
     if args.peptide_features is not None:
         config.USE_PEPTIDE_FEATURES = args.peptide_features
     if args.protein_features is not None:
