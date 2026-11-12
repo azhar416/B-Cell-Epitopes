@@ -58,6 +58,7 @@ def calculate_metrics(
         "accuracy": float(accuracy_score(labels, predictions)),
         "recall": float(recall_score(labels, predictions, zero_division=0)),
         "precision": float(precision_score(labels, predictions, zero_division=0)),
+        "specificity": float(tn / (tn + fp)) if tn + fp else 0.0,
         "f1": float(f1_score(labels, predictions, zero_division=0)),
         "tn": int(tn),
         "fp": int(fp),
@@ -232,6 +233,8 @@ def save_evaluation_plots(
     probabilities: np.ndarray,
     threshold: float,
     output_dir: Path,
+    prefix: str = "",
+    title_prefix: str = "Validation",
 ) -> dict[str, str]:
     """Save validation ROC/precision-recall curves and a confusion-matrix heatmap."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -251,7 +254,7 @@ def save_evaluation_plots(
     axes[0].set(
         xlabel="False positive rate",
         ylabel="True positive rate",
-        title="Validation ROC curve",
+        title=f"{title_prefix} ROC curve",
         xlim=(0, 1),
         ylim=(0, 1.02),
     )
@@ -263,13 +266,14 @@ def save_evaluation_plots(
     axes[1].set(
         xlabel="Recall",
         ylabel="Precision",
-        title="Validation precision-recall curve",
+        title=f"{title_prefix} precision-recall curve",
         xlim=(0, 1),
         ylim=(0, 1.02),
     )
     axes[1].legend(loc="best")
     figure.tight_layout()
-    curves_path = output_dir / "evaluation_curves.png"
+    curves_filename = f"{prefix}evaluation_curves.png" if prefix else "evaluation_curves.png"
+    curves_path = output_dir / curves_filename
     figure.savefig(curves_path, dpi=160, bbox_inches="tight")
     plt.close(figure)
 
@@ -282,7 +286,7 @@ def save_evaluation_plots(
         yticklabels=["Negative (0)", "Positive (1)"],
         xlabel="Predicted label",
         ylabel="True label",
-        title=f"Validation confusion matrix (threshold={threshold:g})",
+        title=f"{title_prefix} confusion matrix (threshold={threshold:g})",
     )
     midpoint = matrix.max() / 2 if matrix.size else 0
     for row in range(2):
@@ -297,7 +301,8 @@ def save_evaluation_plots(
             )
     figure.colorbar(image, ax=axis, label="Examples")
     figure.tight_layout()
-    matrix_path = output_dir / "confusion_matrix.png"
+    matrix_filename = f"{prefix}confusion_matrix.png" if prefix else "confusion_matrix.png"
+    matrix_path = output_dir / matrix_filename
     figure.savefig(matrix_path, dpi=160, bbox_inches="tight")
     plt.close(figure)
 
@@ -364,277 +369,434 @@ def _build_configured_features(dataframe: pd.DataFrame, config: CFG) -> pd.DataF
         use_biological_features=config.USE_BIOLOGICAL_FEATURES,
         peptide_feature_type=config.PEPTIDE_FEATURE_TYPE,
         feature_set=config.FEATURE_SET,
+        use_aac_features=config.EFFECTIVE_AAC_FEATURES,
+        use_dpc_features=config.EFFECTIVE_DPC_FEATURES,
     )
 
 
-def _run_bcell_to_sars(config: CFG) -> dict[str, object]:
-    """Train on all cleaned B-cell rows and score a stratified SARS holdout."""
-    bcell_data = load_labeled_dataset(
+def _select_external_model_from_bcell(
+    config: CFG,
+    features: pd.DataFrame,
+    labels: np.ndarray,
+    groups: np.ndarray,
+) -> tuple[dict[str, object], np.ndarray, list[dict[str, object]]]:
+    """Select model parameters, compute internal 5-fold CV metrics, and choose decision threshold on B-cell."""
+    folds, _ = make_cross_validation_splits(
+        labels,
+        groups,
         dataset_name="bcell",
-        data_dir=config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        n_splits=5,
+        random_state=config.RANDOM_STATE,
     )
-    sars_data = load_labeled_dataset(
-        dataset_name="sars",
-        data_dir=config.EVALUATION_DATA_DIR or config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+    base_parameters = _configured_model_parameters(config)
+    overrides = (
+        config.HYPERPARAMETER_TUNING_CANDIDATES.get(config.MODEL_TYPE, [])
+        if config.HYPERPARAMETER_TUNING
+        else []
     )
-    bcell_labels = bcell_data["target"].to_numpy(dtype=int)
-    sars_labels = sars_data["target"].to_numpy(dtype=int)
-    fold_validation_indices = getattr(
-        config,
-        "_CV_SARS_VALIDATION_INDICES",
-        None,
+    candidates = [base_parameters]
+    candidates.extend(
+        {**base_parameters, **override} for override in overrides
     )
-    if fold_validation_indices is None:
-        sars_train_indices, sars_validation_indices = make_stratified_split(
-            labels=sars_labels,
-            validation_size=config.VALIDATION_SIZE,
-            random_state=config.RANDOM_STATE,
+
+    candidate_results = []
+    for candidate_id, parameters in enumerate(candidates):
+        candidate_config = copy.copy(config)
+        for key, value in parameters.items():
+            setattr(candidate_config, key, value)
+        candidate_config.HYPERPARAMETER_TUNING = False
+        candidate_config.validate()
+
+        oof_scores = np.full(len(labels), np.nan, dtype=float)
+        fold_metrics_list = []
+        for fold_number, (train_indices, validation_indices) in enumerate(folds, 1):
+            fit_features, fit_labels, _ = smote_resample(
+                features.iloc[train_indices],
+                labels[train_indices],
+                enabled=config.USE_SMOTE,
+                random_state=config.RANDOM_STATE,
+                k_neighbors=config.SMOTE_K_NEIGHBORS,
+            )
+            model = _build_configured_model(candidate_config)
+            model.fit(fit_features, fit_labels)
+            val_scores = model.predict_proba(
+                features.iloc[validation_indices]
+            )[:, 1]
+            oof_scores[validation_indices] = val_scores
+            fold_metrics = calculate_metrics(
+                labels[validation_indices],
+                val_scores,
+                threshold=config.PREDICTION_THRESHOLD,
+            )
+            fold_metrics_list.append({"fold": fold_number, **fold_metrics})
+
+        oof_metrics = calculate_metrics(
+            labels,
+            oof_scores,
+            threshold=config.PREDICTION_THRESHOLD,
         )
-    else:
-        sars_validation_indices = np.asarray(fold_validation_indices, dtype=int)
-        sars_train_indices = np.setdiff1d(
-            np.arange(len(sars_labels)),
-            sars_validation_indices,
-        )
-    bcell_features = _build_configured_features(bcell_data, config)
-    sars_features = _build_configured_features(sars_data, config)
-    if not bcell_features.columns.equals(sars_features.columns):
-        raise ValueError(
-            "B-cell and SARS feature columns do not match. "
-            "Check that both datasets contain the selected feature inputs."
+        numeric_metric_names = [
+            key
+            for key, val in fold_metrics_list[0].items()
+            if isinstance(val, (int, float)) and key != "fold"
+        ]
+        mean_fold_metrics = {
+            metric: float(np.mean([f[metric] for f in fold_metrics_list]))
+            for metric in numeric_metric_names
+        }
+        std_fold_metrics = {
+            metric: float(np.std([f[metric] for f in fold_metrics_list]))
+            for metric in numeric_metric_names
+        }
+        selection_metric = config.HYPERPARAMETER_TUNING_METRIC
+        score = float(oof_metrics[selection_metric])
+        candidate_results.append(
+            {
+                "candidate_id": candidate_id,
+                "parameters": parameters,
+                "selection_metric": selection_metric,
+                "selection_score": score,
+                "oof_scores": oof_scores,
+                "oof_metrics": oof_metrics,
+                "fold_metrics": fold_metrics_list,
+                "mean_fold_metrics": mean_fold_metrics,
+                "std_fold_metrics": std_fold_metrics,
+            }
         )
 
-    original_bcell_size = len(bcell_labels)
+    selected = max(candidate_results, key=lambda result: result["selection_score"])
+    threshold_values = np.unique(np.r_[0.0, selected["oof_scores"], 1.0])
+    threshold_mcc = [
+        matthews_corrcoef(labels, selected["oof_scores"] >= value)
+        for value in threshold_values
+    ]
+    best_mcc = max(threshold_mcc)
+    tied_thresholds = [
+        float(value)
+        for value, score in zip(threshold_values, threshold_mcc)
+        if np.isclose(score, best_mcc)
+    ]
+    selected_threshold = min(tied_thresholds, key=lambda value: abs(value - 0.5))
+
+    oof_metrics_at_selected = calculate_metrics(
+        labels,
+        selected["oof_scores"],
+        threshold=selected_threshold,
+    )
+    fold_metrics_selected_threshold = []
+    for fold_report in selected["fold_metrics"]:
+        fold_idx = fold_report["fold"]
+        val_idx = folds[fold_idx - 1][1]
+        val_fold_metrics = calculate_metrics(
+            labels[val_idx],
+            selected["oof_scores"][val_idx],
+            threshold=selected_threshold,
+        )
+        fold_metrics_selected_threshold.append({"fold": fold_idx, **val_fold_metrics})
+    mean_fold_metrics_selected = {
+        metric: float(np.mean([f[metric] for f in fold_metrics_selected_threshold]))
+        for metric in numeric_metric_names
+    }
+    std_fold_metrics_selected = {
+        metric: float(np.std([f[metric] for f in fold_metrics_selected_threshold]))
+        for metric in numeric_metric_names
+    }
+
+    comparison = [
+        {
+            "candidate_id": result["candidate_id"],
+            "parameters": result["parameters"],
+            "selection_metric": result["selection_metric"],
+            "selection_score": result["selection_score"],
+            "selected": result is selected,
+            **{
+                f"oof_{metric}": value
+                for metric, value in result["oof_metrics"].items()
+            },
+        }
+        for result in candidate_results
+    ]
+    selection = {
+        "parameters": selected["parameters"],
+        "selection_metric": selected["selection_metric"],
+        "selection_score": selected["selection_score"],
+        "oof_metrics_at_configured_threshold": selected["oof_metrics"],
+        "oof_metrics_at_selected_threshold": oof_metrics_at_selected,
+        "selected_threshold_from_bcell_oof_mcc": selected_threshold,
+        "threshold_selection_mcc": float(best_mcc),
+        "candidate_count": len(candidates),
+        "fold_metrics": selected["fold_metrics"],
+        "mean_fold_metrics": selected["mean_fold_metrics"],
+        "std_fold_metrics": selected["std_fold_metrics"],
+        "fold_metrics_at_selected_threshold": fold_metrics_selected_threshold,
+        "mean_fold_metrics_at_selected_threshold": mean_fold_metrics_selected,
+        "std_fold_metrics_at_selected_threshold": std_fold_metrics_selected,
+    }
+    return selection, selected["oof_scores"], comparison
+
+
+def _run_external_sars(config: CFG) -> dict[str, object]:
+    """Fit/choose exclusively on B-cell, then evaluate all SARS rows once."""
+    bcell = load_labeled_dataset(
+        "bcell", config.DATA_DIR, max_peptide_length=config.MAX_PEPTIDE_LENGTH
+    )
+    sars = load_labeled_dataset(
+        "sars",
+        config.EVALUATION_DATA_DIR or config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+    )
+    sars_sequences = set(sars["peptide_seq"])
+    overlap_mask = bcell["peptide_seq"].isin(sars_sequences)
+    overlap_sequences = set(bcell.loc[overlap_mask, "peptide_seq"])
+    sars_labels_by_sequence = dict(zip(sars["peptide_seq"], sars["target"]))
+    bcell_labels_by_sequence = dict(zip(bcell["peptide_seq"], bcell["target"]))
+    same_label_overlap = sum(
+        bcell_labels_by_sequence[sequence] == sars_labels_by_sequence[sequence]
+        for sequence in overlap_sequences
+    )
+    conflicting_label_overlap = len(overlap_sequences) - same_label_overlap
+
+    # Keep every SARS peptide for the final score, but remove identical peptide
+    # sequences from model development to avoid exact-sequence leakage.
+    development = bcell.loc[~overlap_mask].reset_index(drop=True)
+    labels = development["target"].to_numpy(dtype=int)
+    groups = development["parent_protein_id"].astype(str).to_numpy()
+    if np.unique(labels).size != 2:
+        raise ValueError(
+            "Removing B-cell/SARS sequence overlaps left only one class in the "
+            "B-cell development set."
+        )
+
+    development_features = _build_configured_features(development, config)
+    sars_features = _build_configured_features(sars, config)
+    missing_features = development_features.columns.difference(sars_features.columns)
+    extra_features = sars_features.columns.difference(development_features.columns)
+    if len(missing_features) or len(extra_features):
+        raise ValueError(
+            "B-cell and SARS feature schemas differ after feature generation. "
+            f"Missing in SARS: {missing_features.tolist()}; "
+            f"extra in SARS: {extra_features.tolist()}."
+        )
+    sars_features = sars_features.reindex(columns=development_features.columns)
+
+    selection, bcell_oof_scores, candidate_comparison = (
+        _select_external_model_from_bcell(
+            config, development_features, labels, groups
+        )
+    )
+    final_config = copy.copy(config)
+    for key, value in selection["parameters"].items():
+        setattr(final_config, key, value)
+    final_config.HYPERPARAMETER_TUNING = False
+    final_config.validate()
+
     fit_features, fit_labels, synthetic_count = smote_resample(
-        bcell_features,
-        bcell_labels,
+        development_features,
+        labels,
         enabled=config.USE_SMOTE,
         random_state=config.RANDOM_STATE,
         k_neighbors=config.SMOTE_K_NEIGHBORS,
     )
-    if config.USE_SMOTE:
-        print(
-            "Cross-dataset mode: SMOTE was applied to B-cell training rows only; "
-            "SARS validation rows remain untouched."
-        )
-    else:
-        print("Cross-dataset mode: SMOTE disabled.")
+    final_model = _build_configured_model(final_config)
+    final_model.fit(fit_features, fit_labels)
+    sars_scores = final_model.predict_proba(sars_features)[:, 1]
+    sars_labels = sars["target"].to_numpy(dtype=int)
+    selected_threshold = float(selection["selected_threshold_from_bcell_oof_mcc"])
 
-    (
-        model,
-        train_probabilities,
-        validation_probabilities,
-        train_metrics,
-        validation_metrics,
-        hyperparameter_comparison,
-        selected_hyperparameters,
-    ) = _fit_and_score_candidates(
-        config=config,
-        fit_features=fit_features,
-        fit_labels=fit_labels,
-        train_features=bcell_features,
-        train_labels=bcell_labels,
-        validation_features=sars_features.iloc[sars_validation_indices],
-        validation_labels=sars_labels[sars_validation_indices],
-    )
-    validation_features = sars_features.iloc[sars_validation_indices]
-    validation_labels = sars_labels[sars_validation_indices]
-
-    output_dir = (
-        config.OUTPUT_DIR
-        if getattr(config, "_CV_FOLD_NUMBER", None) is not None
-        else config.OUTPUT_DIR / "bcell_to_sars"
-    )
+    output_dir = config.OUTPUT_DIR / config.FEATURE_SET / "external_sars"
     output_dir.mkdir(parents=True, exist_ok=True)
-    comparison_plot = save_train_validation_metrics_plot(
-        train_metrics,
-        validation_metrics,
-        output_dir,
-        train_label="B-cell training",
-        validation_label="SARS holdout",
-        title="B-cell training vs SARS holdout",
-    )
-    evaluation_plots = save_evaluation_plots(
-        validation_labels,
-        validation_probabilities,
-        threshold=config.PREDICTION_THRESHOLD,
-        output_dir=output_dir,
-    )
-    sars_validation = sars_data.iloc[sars_validation_indices]
     pd.DataFrame(
         {
-            "peptide_seq": sars_validation["peptide_seq"].to_numpy(),
-            "target": validation_labels,
-            "parent_protein_id": sars_validation[
-                "parent_protein_id"
-            ].to_numpy(),
-            "is_synthetic": False,
-            "validation_probability": validation_probabilities,
-            "validation_prediction": (
-                validation_probabilities >= config.PREDICTION_THRESHOLD
+            "peptide_seq": development["peptide_seq"],
+            "target": labels,
+            "parent_protein_id": groups,
+            "bcell_oof_probability": bcell_oof_scores,
+        }
+    ).to_csv(output_dir / "bcell_oof_predictions.csv", index=False)
+    pd.DataFrame(selection["fold_metrics"]).to_csv(
+        output_dir / "bcell_fold_metrics.csv", index=False
+    )
+    pd.DataFrame(candidate_comparison).assign(
+        parameters=lambda frame: frame["parameters"].map(json.dumps)
+    ).to_csv(output_dir / "bcell_model_selection.csv", index=False)
+    pd.DataFrame(
+        {
+            "peptide_seq": sars["peptide_seq"].to_numpy(),
+            "target": sars_labels,
+            "parent_protein_id": sars["parent_protein_id"].to_numpy(),
+            "probability_positive": sars_scores,
+            "prediction_at_0_5": (sars_scores >= 0.5).astype(int),
+            "prediction_at_bcell_selected_threshold": (
+                sars_scores >= selected_threshold
             ).astype(int),
         }
-    ).to_csv(output_dir / "validation_predictions.csv", index=False)
-    if hyperparameter_comparison:
-        pd.DataFrame(hyperparameter_comparison).assign(
-            hyperparameters=lambda frame: frame["hyperparameters"].map(
-                json.dumps
-            )
-        ).to_csv(output_dir / "hyperparameter_comparison.csv", index=False)
+    ).to_csv(output_dir / "external_sars_predictions.csv", index=False)
 
-    sars_sequences = set(sars_data["peptide_seq"])
-    bcell_sequences = set(bcell_data["peptide_seq"])
-    overlapping_sequences = len(sars_sequences.intersection(bcell_sequences))
-    if overlapping_sequences:
-        print(
-            "Warning: "
-            f"{overlapping_sequences} unique peptide sequences occur in both "
-            "B-cell training data and cleaned SARS data."
-        )
-
-    bundle = {
-        "model": model,
-        "feature_names": bcell_features.columns.tolist(),
-        "feature_profile": config.FEATURE_SET,
-        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
-        "use_protein_features": config.USE_PROTEIN_FEATURES,
-        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
-        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
-        "prediction_threshold": config.PREDICTION_THRESHOLD,
-        "training_dataset": "bcell",
-        "evaluation_dataset": "sars",
-        "training_mode": config.TRAINING_MODE,
-        "artifact_directory": str(output_dir),
-        "random_state": config.RANDOM_STATE,
-        "use_smote": config.USE_SMOTE,
-        "smote_k_neighbors": config.SMOTE_K_NEIGHBORS,
-        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
-        "selected_hyperparameters": selected_hyperparameters,
+    metrics_at_05 = calculate_metrics(sars_labels, sars_scores, threshold=0.5)
+    metrics_at_selected = calculate_metrics(
+        sars_labels, sars_scores, threshold=selected_threshold
+    )
+    bcell_plots = save_evaluation_plots(
+        labels,
+        bcell_oof_scores,
+        threshold=selected_threshold,
+        output_dir=output_dir,
+        prefix="bcell_oof_",
+        title_prefix="B-cell 5-Fold Group CV",
+    )
+    sars_plots = save_evaluation_plots(
+        sars_labels,
+        sars_scores,
+        threshold=selected_threshold,
+        output_dir=output_dir,
+        prefix="external_sars_",
+        title_prefix="External SARS",
+    )
+    # Default plot filenames for compatibility
+    save_evaluation_plots(
+        sars_labels,
+        sars_scores,
+        threshold=selected_threshold,
+        output_dir=output_dir,
+        prefix="",
+        title_prefix="External SARS",
+    )
+    overlap_report = {
+        "unique_exact_peptide_sequences": len(overlap_sequences),
+        "same_label": int(same_label_overlap),
+        "opposite_label": int(conflicting_label_overlap),
+        "bcell_rows_excluded_from_development": int(overlap_mask.sum()),
+        "sars_rows_retained_for_external_evaluation": int(len(sars)),
     }
-    dump(bundle, output_dir / "peptide_classifier.joblib")
-
     report: dict[str, object] = {
+        "training_mode": "external_sars",
         "training_dataset": "bcell",
-        "evaluation_dataset": "sars",
-        "training_mode": config.TRAINING_MODE,
+        "external_evaluation_dataset": "sars",
+        "external_evaluation_split": "all cleaned SARS rows evaluated once; no SARS split",
+        "sars_labels_used_for_model_or_threshold_selection": False,
+        "internal_selection_protocol": "5-fold StratifiedGroupKFold on B-cell, grouped by parent_protein_id",
+        "primary_selection_metric": (
+            "average_precision"
+            if config.HYPERPARAMETER_TUNING_METRIC == "pr_auc"
+            else config.HYPERPARAMETER_TUNING_METRIC
+        ),
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
-        "class_labels": {"0": "negative", "1": "positive"},
-        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
-        "use_protein_features": config.USE_PROTEIN_FEATURES,
-        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
-        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
-        "split_strategy": (
-            "stratified_peptide_5_fold"
-            if fold_validation_indices is not None
-            else "stratified_peptide_sars_holdout"
-        ),
-        "fold": getattr(config, "_CV_FOLD_NUMBER", None),
-        "train_size": original_bcell_size,
-        "validation_size": len(sars_validation_indices),
-        "sars_train_unused_size": len(sars_train_indices),
-        "train_fraction": 1.0,
-        "validation_fraction": len(sars_validation_indices) / len(sars_data),
-        "sars_train_protein_count": int(
-            sars_data.iloc[sars_train_indices]["parent_protein_id"].nunique()
-        ),
-        "sars_validation_protein_count": int(
-            sars_data.iloc[sars_validation_indices]["parent_protein_id"].nunique()
-        ),
-        "sars_train_validation_proteins_overlap": bool(
-            set(sars_data.iloc[sars_train_indices]["parent_protein_id"])
-            & set(sars_data.iloc[sars_validation_indices]["parent_protein_id"])
-        ),
-        "train_protein_count": int(bcell_data["parent_protein_id"].nunique()),
-        "validation_protein_count": int(
-            sars_data.iloc[sars_validation_indices]["parent_protein_id"].nunique()
-        ),
-        "n_synthetic_examples": synthetic_count,
-        "bcell_class_counts": (
-            pd.Series(bcell_labels).value_counts().sort_index().to_dict()
-        ),
-        "train_class_counts": (
-            pd.Series(bcell_labels).value_counts().sort_index().to_dict()
-        ),
-        "fit_class_counts": (
-            pd.Series(fit_labels).value_counts().sort_index().to_dict()
-        ),
-        "sars_class_counts": (
-            pd.Series(sars_labels).value_counts().sort_index().to_dict()
-        ),
-        "sars_train_class_counts": (
-            pd.Series(sars_labels[sars_train_indices])
-            .value_counts()
-            .sort_index()
-            .to_dict()
-        ),
-        "validation_class_counts": (
-            pd.Series(validation_labels).value_counts().sort_index().to_dict()
-        ),
-        "overlapping_unique_peptide_sequences": overlapping_sequences,
-        "threshold": config.PREDICTION_THRESHOLD,
-        "training_metrics": train_metrics,
-        "validation_metrics": validation_metrics,
-        "hyperparameter_tuning": config.HYPERPARAMETER_TUNING,
-        "hyperparameter_tuning_metric": (
-            config.HYPERPARAMETER_TUNING_METRIC
-            if config.HYPERPARAMETER_TUNING
-            else None
-        ),
-        "selected_hyperparameters": selected_hyperparameters,
-        "hyperparameter_comparison": hyperparameter_comparison,
-        "hyperparameter_comparison_path": (
-            str(output_dir / "hyperparameter_comparison.csv")
-            if hyperparameter_comparison
-            else None
-        ),
-        "training_validation_metrics_plot": comparison_plot,
-        "evaluation_plots": evaluation_plots,
-        "validation_predictions": str(output_dir / "validation_predictions.csv"),
+        "feature_columns": development_features.columns.tolist(),
+        "bcell_rows_before_overlap_exclusion": int(len(bcell)),
+        "bcell_rows_used_for_development": int(len(development)),
+        "bcell_proteins_used_for_development": int(development.parent_protein_id.nunique()),
+        "bcell_class_counts_used_for_development": pd.Series(labels).value_counts().sort_index().to_dict(),
+        "external_sars_rows": int(len(sars)),
+        "external_sars_proteins": int(sars.parent_protein_id.nunique()),
+        "external_sars_class_counts": pd.Series(sars_labels).value_counts().sort_index().to_dict(),
+        "exact_sequence_overlap_audit": overlap_report,
+        "internal_bcell_cv": {
+            "protocol": "5-fold StratifiedGroupKFold on B-cell, grouped by parent_protein_id",
+            "folds": selection["fold_metrics"],
+            "mean_metrics": selection["mean_fold_metrics"],
+            "std_metrics": selection["std_fold_metrics"],
+            "folds_at_selected_threshold": selection["fold_metrics_at_selected_threshold"],
+            "mean_metrics_at_selected_threshold": selection["mean_fold_metrics_at_selected_threshold"],
+            "std_metrics_at_selected_threshold": selection["std_fold_metrics_at_selected_threshold"],
+            "oof_metrics_threshold_0_5": selection["oof_metrics_at_configured_threshold"],
+            "oof_metrics_bcell_selected_threshold": selection["oof_metrics_at_selected_threshold"],
+            "selected_threshold": selected_threshold,
+            "threshold_selection_mcc": selection["threshold_selection_mcc"],
+            "fold_metrics_path": str(output_dir / "bcell_fold_metrics.csv"),
+            "predictions_path": str(output_dir / "bcell_oof_predictions.csv"),
+            "evaluation_plots": bcell_plots,
+        },
+        "external_sars_evaluation": {
+            "protocol": "One-shot external evaluation on complete cleaned SARS dataset",
+            "rows": int(len(sars)),
+            "proteins": int(sars.parent_protein_id.nunique()),
+            "class_counts": pd.Series(sars_labels).value_counts().sort_index().to_dict(),
+            "metrics_threshold_0_5": metrics_at_05,
+            "metrics_bcell_selected_threshold": metrics_at_selected,
+            "predictions_path": str(output_dir / "external_sars_predictions.csv"),
+            "evaluation_plots": sars_plots,
+        },
+        "model_selection": selection,
+        "resampling": {
+            "method": "SMOTE" if config.USE_SMOTE else "none",
+            "scope": "B-cell training folds and final B-cell refit only",
+            "synthetic_rows_final_refit": int(synthetic_count),
+        },
+        "class_weight": config.CLASS_WEIGHT,
+        "external_sars_metrics_threshold_0_5": metrics_at_05,
+        "external_sars_metrics_bcell_selected_threshold": metrics_at_selected,
+        "evaluation_plots": sars_plots,
+        "predictions_path": str(output_dir / "external_sars_predictions.csv"),
         "artifact_directory": str(output_dir),
-        "resampling": (
-            {
-                "method": "SMOTE",
-                "scope": "B-cell training data only",
-                "k_neighbors": config.SMOTE_K_NEIGHBORS,
-            }
-            if config.USE_SMOTE
-            else {"method": "none"}
-        ),
-        "validation_metrics_interpretation": (
-            "Metrics use a stratified peptide-level SARS holdout. The remaining "
-            "SARS rows were not used for fitting, but the same source protein "
-            "may occur in both partitions."
+        "interpretation_limit": (
+            "The cleaned SARS dataset contains one parent protein; this is a "
+            "single-protein external evaluation, not broad unseen-protein validation."
         ),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in asdict(config).items()
         },
     }
-    with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
+    with (output_dir / "external_sars_metrics.json").open(
+        "w", encoding="utf-8"
+    ) as file:
         json.dump(report, file, indent=2)
 
+    bundle = {
+        "model": final_model,
+        "feature_names": development_features.columns.tolist(),
+        "feature_profile": config.FEATURE_SET,
+        "use_peptide_features": config.USE_PEPTIDE_FEATURES,
+        "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
+        "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
+        "use_protein_features": config.USE_PROTEIN_FEATURES,
+        "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
+        "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
+        "prediction_threshold": selected_threshold,
+        "training_dataset": "bcell",
+        "external_evaluation_dataset": "sars",
+        "selected_hyperparameters": selection["parameters"],
+        "exact_overlap_sequences_excluded_from_training": len(overlap_sequences),
+    }
+    dump(bundle, output_dir / "peptide_classifier.joblib")
+
+    print("\n" + "=" * 96)
+    print("EXPERIMENT EVALUATION SUMMARY: B-cell 5-Fold Group CV vs External SARS")
+    print("=" * 96)
     print(
-        f"Cross-dataset split: train on {original_bcell_size:,} B-cell rows; "
-        f"evaluate on {len(sars_validation_indices):,}/{len(sars_data):,} "
-        "stratified SARS peptide rows (peptide-level holdout; not a "
-        "protein-level holdout)."
+        f"{'Metric':<16} | {'B-cell CV (Mean ± SD)':<24} | "
+        f"{'B-cell Pooled OOF':<18} | {'SARS (Thresh 0.5)':<18} | "
+        f"{'SARS (Thresh ' + f'{selected_threshold:.3f})':<20}"
     )
+    print("-" * 96)
+    summary_metrics = [
+        ("roc_auc", "ROC-AUC"),
+        ("pr_auc", "PR-AUC (AP)"),
+        ("accuracy", "Accuracy"),
+        ("recall", "Recall / Sens."),
+        ("specificity", "Specificity"),
+        ("precision", "Precision"),
+        ("f1", "F1-Score"),
+        ("mcc", "MCC"),
+    ]
+    for metric_key, metric_name in summary_metrics:
+        bcell_mean = selection["mean_fold_metrics"].get(metric_key, 0.0)
+        bcell_std = selection["std_fold_metrics"].get(metric_key, 0.0)
+        bcell_oof = selection["oof_metrics_at_configured_threshold"].get(metric_key, 0.0)
+        sars_05 = metrics_at_05.get(metric_key, 0.0)
+        sars_sel = metrics_at_selected.get(metric_key, 0.0)
+        print(
+            f"{metric_name:<16} | {bcell_mean:.4f} ± {bcell_std:.4f}          | "
+            f"{bcell_oof:<18.4f} | {sars_05:<18.4f} | {sars_sel:<20.4f}"
+        )
+    print("=" * 96 + "\n")
     print(
-        f"SARS holdout ROC-AUC={validation_metrics['roc_auc']:.4f}, "
-        f"PR-AUC={validation_metrics['pr_auc']:.4f}, "
-        f"Accuracy={validation_metrics['accuracy']:.4f}, "
-        f"Recall={validation_metrics['recall']:.4f}, "
-        f"Precision={validation_metrics['precision']:.4f}, "
-        f"F1={validation_metrics['f1']:.4f}, "
-        f"TN={validation_metrics['tn']}, FP={validation_metrics['fp']}, "
-        f"FN={validation_metrics['fn']}, TP={validation_metrics['tp']}, "
-        f"Balanced accuracy={validation_metrics['balanced_accuracy']:.4f}, "
-        f"MCC={validation_metrics['mcc']:.4f}"
+        f"External SARS evaluation complete: {len(sars):,} peptides from "
+        f"{sars.parent_protein_id.nunique():,} protein(s); "
+        f"excluded {len(overlap_sequences):,} exact B-cell/SARS peptide overlaps from training."
     )
-    print(f"Saved cross-dataset artifacts to: {output_dir}")
+    print(f"Saved experiment artifacts to: {output_dir}")
     return report
 
 
@@ -645,8 +807,6 @@ def _run_training_single(
 ) -> dict[str, object]:
     """Run one training fold using the existing dataset-specific pipeline."""
     config.validate()
-    if config.TRAINING_MODE == "bcell_to_sars":
-        return _run_bcell_to_sars(config)
 
     dataframe = load_labeled_dataset(
         dataset_name=config.DATASET_NAME,
@@ -791,6 +951,8 @@ def _run_training_single(
         "feature_names": feature_frame.columns.tolist(),
         "feature_profile": config.FEATURE_SET,
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
+        "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
+        "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
@@ -813,6 +975,8 @@ def _run_training_single(
         "feature_set": config.FEATURE_SET,
         "class_labels": {"0": "negative", "1": "positive"},
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
+        "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
+        "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
         "use_protein_features": config.USE_PROTEIN_FEATURES,
         "use_biological_features": config.USE_BIOLOGICAL_FEATURES,
         "peptide_feature_type": config.PEPTIDE_FEATURE_TYPE,
@@ -904,55 +1068,36 @@ def run_training(config: CFG) -> dict[str, object]:
     """Run five-fold CV, grouping proteins except for peptide-level SARS folds."""
     config.validate()
     config.OUTPUT_DIR = Path(config.OUTPUT_DIR)
-    if config.TRAINING_MODE == "bcell_to_sars":
-        sars_data = load_labeled_dataset(
-            dataset_name="sars",
-            data_dir=config.EVALUATION_DATA_DIR or config.DATA_DIR,
-            max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        )
-        folds, split_strategy = make_cross_validation_splits(
-            sars_data["target"].to_numpy(dtype=int),
-            sars_data["parent_protein_id"].to_numpy(),
-            dataset_name="sars",
-            n_splits=5,
-            random_state=config.RANDOM_STATE,
-        )
-        profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
-        summary_dir = profile_output_dir / "bcell_to_sars" / "cross_validation"
-    else:
-        dataframe = load_labeled_dataset(
-            dataset_name=config.DATASET_NAME,
-            data_dir=config.DATA_DIR,
-            max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        )
-        folds, split_strategy = make_cross_validation_splits(
-            dataframe["target"].to_numpy(dtype=int),
-            dataframe["parent_protein_id"].to_numpy(),
-            dataset_name=config.DATASET_NAME,
-            n_splits=5,
-            random_state=config.RANDOM_STATE,
-        )
-        profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
-        summary_dir = profile_output_dir / "cross_validation"
+    if config.TRAINING_MODE in {"external_sars", "bcell_to_sars"}:
+        return _run_external_sars(config)
+
+    dataframe = load_labeled_dataset(
+        dataset_name=config.DATASET_NAME,
+        data_dir=config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+    )
+    folds, split_strategy = make_cross_validation_splits(
+        dataframe["target"].to_numpy(dtype=int),
+        dataframe["parent_protein_id"].to_numpy(),
+        dataset_name=config.DATASET_NAME,
+        n_splits=5,
+        random_state=config.RANDOM_STATE,
+    )
+    profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
+    summary_dir = profile_output_dir / "cross_validation"
 
     fold_reports = []
     for fold_number, fold_split in enumerate(folds, 1):
         fold_config = copy.copy(config)
         fold_config.OUTPUT_DIR = (
-            summary_dir.parent / f"fold_{fold_number}"
-            if config.TRAINING_MODE == "bcell_to_sars"
-            else profile_output_dir / "cross_validation" / f"fold_{fold_number}"
+            profile_output_dir / "cross_validation" / f"fold_{fold_number}"
         )
         fold_config._CV_FOLD_NUMBER = fold_number
-        if config.TRAINING_MODE == "bcell_to_sars":
-            fold_config._CV_SARS_VALIDATION_INDICES = fold_split[1]
-            fold_report = _run_training_single(fold_config)
-        else:
-            fold_report = _run_training_single(
-                fold_config,
-                supplied_split=fold_split,
-                split_strategy_override=split_strategy,
-            )
+        fold_report = _run_training_single(
+            fold_config,
+            supplied_split=fold_split,
+            split_strategy_override=split_strategy,
+        )
         fold_reports.append(fold_report)
 
     prediction_frames = []
@@ -1103,10 +1248,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", choices=("bcell", "sars"))
     parser.add_argument(
         "--training-mode",
-        choices=("same_dataset", "bcell_to_sars"),
+        choices=("same_dataset", "bcell_to_sars", "external_sars"),
         help=(
-            "Use the existing same-dataset split or train on all B-cell rows "
-            "and evaluate on a stratified SARS holdout."
+            "Use internal dataset CV or train/select on B-cell only and "
+            "evaluate all cleaned SARS rows once. bcell_to_sars is a legacy alias."
         ),
     )
     parser.add_argument(
@@ -1125,13 +1270,13 @@ def parse_args() -> argparse.Namespace:
         "--peptide-features",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable or disable peptide AAC features.",
+        help="Legacy peptide-feature switch; use --aac-features and --dpc-features for independent groups.",
     )
     parser.add_argument(
         "--protein-features",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable or disable protein AAC and position features (requires peptide features).",
+        help="Independently enable or disable protein composition and position features.",
     )
     parser.add_argument(
         "--biological-features",
@@ -1140,9 +1285,21 @@ def parse_args() -> argparse.Namespace:
         help="Enable or disable the eight biological descriptors.",
     )
     parser.add_argument(
+        "--aac-features",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Independently enable or disable peptide AAC features.",
+    )
+    parser.add_argument(
+        "--dpc-features",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Independently enable or disable dipeptide composition features.",
+    )
+    parser.add_argument(
         "--peptide-feature-type",
         choices=("aac", "aac_dipeptide"),
-        help="Peptide feature composition when peptide features are enabled.",
+        help="Legacy composition setting used when independent AAC/DPC switches are omitted.",
     )
     parser.add_argument("--validation-size", type=float, default=0.2)
     parser.add_argument("--output-dir", type=Path)
@@ -1166,6 +1323,10 @@ def main() -> None:
         config.USE_PROTEIN_FEATURES = args.protein_features
     if args.biological_features is not None:
         config.USE_BIOLOGICAL_FEATURES = args.biological_features
+    if args.aac_features is not None:
+        config.USE_AAC_FEATURES = args.aac_features
+    if args.dpc_features is not None:
+        config.USE_DPC_FEATURES = args.dpc_features
     if args.peptide_feature_type:
         config.PEPTIDE_FEATURE_TYPE = args.peptide_feature_type
     config.VALIDATION_SIZE = args.validation_size

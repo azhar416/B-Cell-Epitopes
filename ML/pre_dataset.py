@@ -43,6 +43,8 @@ def build_feature_frame(
     peptide_feature_type: str = "aac",
     sequence_column: str = "peptide_seq",
     feature_set: str = "proposed",
+    use_aac_features: bool | None = None,
+    use_dpc_features: bool | None = None,
 ) -> pd.DataFrame:
     """Build the paper-based comparison profile or the proposed feature set."""
     if not isinstance(feature_set, str):
@@ -89,13 +91,7 @@ def build_feature_frame(
             index=dataframe.index,
         )
         for column in DESCRIPTOR_COLUMNS:
-            values = pd.to_numeric(dataframe[column], errors="coerce")
-            # The paper removed descriptors that were constant in SARS-CoV.
-            if values.nunique(dropna=True) > 1:
-                features[column] = values
-        # A source protein shared by every row has no informative length feature.
-        if features["protein_length"].nunique() <= 1:
-            features = features.drop(columns="protein_length")
+            features[column] = pd.to_numeric(dataframe[column], errors="coerce")
         return features
 
     for name, enabled in (
@@ -105,14 +101,6 @@ def build_feature_frame(
     ):
         if not isinstance(enabled, bool):
             raise ValueError(f"{name} must be a boolean.")
-    if use_protein_features and not use_peptide_features:
-        raise ValueError(
-            "Protein features require peptide features to be enabled."
-        )
-    if not any(
-        (use_peptide_features, use_protein_features, use_biological_features)
-    ):
-        raise ValueError("At least one feature group must be enabled.")
     if not isinstance(peptide_feature_type, str):
         raise ValueError("peptide_feature_type must be a string.")
     peptide_feature_type = peptide_feature_type.lower()
@@ -120,7 +108,30 @@ def build_feature_frame(
         raise ValueError(
             "peptide_feature_type must be 'aac' or 'aac_dipeptide'."
         )
-    if (use_peptide_features or use_protein_features) and sequence_column not in dataframe:
+    use_aac_features = (
+        use_peptide_features if use_aac_features is None else use_aac_features
+    )
+    use_dpc_features = (
+        use_peptide_features and peptide_feature_type == "aac_dipeptide"
+        if use_dpc_features is None
+        else use_dpc_features
+    )
+    for name, enabled in (
+        ("use_aac_features", use_aac_features),
+        ("use_dpc_features", use_dpc_features),
+    ):
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{name} must be a boolean or None.")
+    if not any(
+        (
+            use_aac_features,
+            use_dpc_features,
+            use_protein_features,
+            use_biological_features,
+        )
+    ):
+        raise ValueError("At least one feature group must be enabled.")
+    if (use_aac_features or use_dpc_features or use_protein_features) and sequence_column not in dataframe:
         raise ValueError(f"DataFrame is missing sequence column {sequence_column!r}.")
 
     sequences = (
@@ -128,11 +139,11 @@ def build_feature_frame(
             normalize_sequence(value, row_label=index)
             for index, value in dataframe[sequence_column].items()
         ]
-        if use_peptide_features or use_protein_features
+        if use_aac_features or use_dpc_features or use_protein_features
         else []
     )
     features: dict[str, list[float]] = {}
-    if use_peptide_features:
+    if use_aac_features:
         features.update(
             {f"aac_{amino_acid}": [] for amino_acid in AMINO_ACIDS}
         )
@@ -140,7 +151,7 @@ def build_feature_frame(
         features["sequence_length"] = []
 
     dipeptides = [first + second for first in AMINO_ACIDS for second in AMINO_ACIDS]
-    if use_peptide_features and peptide_feature_type == "aac_dipeptide":
+    if use_dpc_features:
         features.update({f"dpc_{dipeptide}": [] for dipeptide in dipeptides})
 
     protein_sequences = None
@@ -181,18 +192,19 @@ def build_feature_frame(
         features["start_position"] = []
         features["end_position"] = []
 
-    if use_peptide_features:
+    if use_aac_features or use_dpc_features:
         for sequence in sequences:
             residue_counts = Counter(sequence)
             sequence_length = len(sequence)
-            for amino_acid in AMINO_ACIDS:
-                features[f"aac_{amino_acid}"].append(
-                    residue_counts[amino_acid] / sequence_length
-                )
-            features["aac_X"].append(residue_counts["X"] / sequence_length)
-            features["sequence_length"].append(float(sequence_length))
+            if use_aac_features:
+                for amino_acid in AMINO_ACIDS:
+                    features[f"aac_{amino_acid}"].append(
+                        residue_counts[amino_acid] / sequence_length
+                    )
+                features["aac_X"].append(residue_counts["X"] / sequence_length)
+                features["sequence_length"].append(float(sequence_length))
 
-            if peptide_feature_type == "aac_dipeptide":
+            if use_dpc_features:
                 pair_counts = Counter(
                     sequence[index : index + 2]
                     for index in range(sequence_length - 1)

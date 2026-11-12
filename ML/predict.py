@@ -57,6 +57,18 @@ def predict_peptides(
         if legacy_feature_set in {"aac", "aac_dipeptide"}
         else "aac",
     )
+    use_aac_features = bool(
+        bundle.get("use_aac_features", use_peptide_features)
+    )
+    use_dpc_features = bool(
+        bundle.get(
+            "use_dpc_features",
+            use_peptide_features and peptide_feature_type == "aac_dipeptide",
+        )
+    )
+    if feature_profile == "perbandingan_1":
+        use_aac_features = False
+        use_dpc_features = False
     input_frame = pd.DataFrame({"peptide_seq": sequences})
     if use_biological_features:
         if descriptor_data is None:
@@ -142,6 +154,8 @@ def predict_peptides(
         use_biological_features=use_biological_features,
         peptide_feature_type=peptide_feature_type,
         feature_set=feature_profile,
+        use_aac_features=use_aac_features,
+        use_dpc_features=use_dpc_features,
     ).reindex(columns=feature_names)
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])

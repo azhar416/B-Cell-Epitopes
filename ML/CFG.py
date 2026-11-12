@@ -14,15 +14,19 @@ class CFG:
     EVALUATION_DATA_DIR: Path | None = None
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
-    TRAINING_MODE: str = "same_dataset"
+    TRAINING_MODE: str = "external_sars"
     FEATURE_SET: str = "proposed"
     USE_PEPTIDE_FEATURES: bool = False
     USE_PROTEIN_FEATURES: bool = False
     USE_BIOLOGICAL_FEATURES: bool = True
+    # None preserves the legacy behavior of USE_PEPTIDE_FEATURES and
+    # PEPTIDE_FEATURE_TYPE; explicit booleans make AAC/DPC independent groups.
+    USE_AAC_FEATURES: bool | None = None
+    USE_DPC_FEATURES: bool | None = None
     PEPTIDE_FEATURE_TYPE: str = "aac"
     VALIDATION_SIZE: float = 0.2
     RANDOM_STATE: int = 42
-    USE_SMOTE: bool = True
+    USE_SMOTE: bool = False
     SMOTE_K_NEIGHBORS: int = 5
     MAX_PEPTIDE_LENGTH: int = 20
     PREDICTION_THRESHOLD: float = 0.5
@@ -42,7 +46,7 @@ class CFG:
     SVM_C: float = 1.0
     SVM_GAMMA: str | float = "scale"
     HYPERPARAMETER_TUNING: bool = False
-    HYPERPARAMETER_TUNING_METRIC: str = "roc_auc"
+    HYPERPARAMETER_TUNING_METRIC: str = "pr_auc"
     HYPERPARAMETER_TUNING_CANDIDATES: dict[str, list[dict[str, object]]] = field(
         default_factory=lambda: {
             "logistic_regression": [
@@ -73,6 +77,23 @@ class CFG:
         }
     )
 
+    @property
+    def EFFECTIVE_AAC_FEATURES(self) -> bool:
+        return (
+            self.USE_PEPTIDE_FEATURES
+            if self.USE_AAC_FEATURES is None
+            else self.USE_AAC_FEATURES
+        )
+
+    @property
+    def EFFECTIVE_DPC_FEATURES(self) -> bool:
+        return (
+            self.USE_PEPTIDE_FEATURES
+            and self.PEPTIDE_FEATURE_TYPE.lower() == "aac_dipeptide"
+            if self.USE_DPC_FEATURES is None
+            else self.USE_DPC_FEATURES
+        )
+
     def validate(self) -> None:
         if not isinstance(self.FEATURE_SET, str):
             raise ValueError("FEATURE_SET must be 'perbandingan_1' or 'proposed'.")
@@ -95,14 +116,25 @@ class CFG:
         if not isinstance(self.TRAINING_MODE, str):
             raise ValueError("TRAINING_MODE must be a string.")
         self.TRAINING_MODE = self.TRAINING_MODE.lower()
-        if self.TRAINING_MODE not in {"same_dataset", "bcell_to_sars"}:
+        if self.TRAINING_MODE not in {
+            "same_dataset",
+            "bcell_to_sars",
+            "external_sars",
+        }:
             raise ValueError(
-                "TRAINING_MODE must be 'same_dataset' or 'bcell_to_sars'."
+                "TRAINING_MODE must be 'same_dataset' or 'external_sars'."
             )
-        if self.TRAINING_MODE == "bcell_to_sars" and self.VALIDATION_SIZE != 0.2:
+        # Keep the old option as a compatibility alias, but route it through
+        # the one-shot external evaluation rather than a SARS holdout.
+        if self.TRAINING_MODE == "bcell_to_sars":
+            self.TRAINING_MODE = "external_sars"
+        if (
+            self.TRAINING_MODE == "external_sars"
+            and self.DATASET_NAME.lower() != "bcell"
+        ):
             raise ValueError(
-                "bcell_to_sars mode evaluates a fixed 20% SARS holdout; "
-                "VALIDATION_SIZE must be 0.2."
+                "external_sars always trains on DATASET_NAME='bcell' and "
+                "evaluates on the SARS evaluation dataset."
             )
         for name in (
             "USE_PEPTIDE_FEATURES",
@@ -111,19 +143,10 @@ class CFG:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
-        if self.FEATURE_SET == "proposed":
-            if self.USE_PROTEIN_FEATURES and not self.USE_PEPTIDE_FEATURES:
-                raise ValueError(
-                    "USE_PROTEIN_FEATURES=True requires USE_PEPTIDE_FEATURES=True."
-                )
-            if not any(
-                (
-                    self.USE_PEPTIDE_FEATURES,
-                    self.USE_PROTEIN_FEATURES,
-                    self.USE_BIOLOGICAL_FEATURES,
-                )
-            ):
-                raise ValueError("At least one feature group must be enabled.")
+        for name in ("USE_AAC_FEATURES", "USE_DPC_FEATURES"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError(f"{name} must be a boolean or None.")
         if not isinstance(self.PEPTIDE_FEATURE_TYPE, str):
             raise ValueError("PEPTIDE_FEATURE_TYPE must be a string.")
         if self.PEPTIDE_FEATURE_TYPE.lower() not in {"aac", "aac_dipeptide"}:
@@ -131,6 +154,15 @@ class CFG:
                 "PEPTIDE_FEATURE_TYPE must be 'aac' or 'aac_dipeptide'."
             )
         self.PEPTIDE_FEATURE_TYPE = self.PEPTIDE_FEATURE_TYPE.lower()
+        if self.FEATURE_SET == "proposed" and not any(
+            (
+                self.EFFECTIVE_AAC_FEATURES,
+                self.EFFECTIVE_DPC_FEATURES,
+                self.USE_PROTEIN_FEATURES,
+                self.USE_BIOLOGICAL_FEATURES,
+            )
+        ):
+            raise ValueError("At least one feature group must be enabled.")
         if not 0 < self.VALIDATION_SIZE < 1:
             raise ValueError("VALIDATION_SIZE must be between 0 and 1.")
         if self.SMOTE_K_NEIGHBORS < 1:
@@ -177,6 +209,11 @@ class CFG:
         }:
             raise ValueError(
                 "CLASS_WEIGHT must be 'balanced', 'balanced_subsample', or None."
+            )
+        if self.USE_SMOTE and self.CLASS_WEIGHT is not None:
+            raise ValueError(
+                "USE_SMOTE and CLASS_WEIGHT cannot both be active simultaneously. "
+                "Choose either SMOTE oversampling or class weighting to address imbalance."
             )
         if (
             self.CLASS_WEIGHT == "balanced_subsample"
