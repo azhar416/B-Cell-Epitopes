@@ -25,7 +25,7 @@ from ML.dataset import (
 from ML.oversampling import smote_resample
 from ML.selection import (
     _build_configured_model,
-    _select_hyperparameters_with_inner_cv,
+    _select_hyperparameters_on_validation,
     _select_external_model_from_bcell,
 )
 from ML.pre_dataset import build_feature_frame
@@ -267,7 +267,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "external_evaluation_dataset": "sars",
         "external_evaluation_split": "all cleaned SARS rows evaluated once; no SARS split",
         "sars_labels_used_for_model_or_threshold_selection": False,
-        "internal_selection_protocol": "5-fold StratifiedGroupKFold on B-cell, grouped by parent_protein_id",
+        "internal_selection_protocol": (
+            "5-fold StratifiedGroupKFold on B-cell; each outer validation fold "
+            "directly scores the hyperparameter candidates, so these internal "
+            "metrics are tuning results rather than an independent estimate."
+        ),
         "primary_selection_metric": (
             "average_precision"
             if config.HYPERPARAMETER_TUNING_METRIC == "pr_auc"
@@ -473,16 +477,13 @@ def _run_training_single(
         )
     else:
         print("SMOTE disabled.")
-    training_groups = dataframe.iloc[train_indices][
-        "parent_protein_id"
-    ].astype(str).to_numpy()
     selected_hyperparameters, hyperparameter_comparison = (
-        _select_hyperparameters_with_inner_cv(
+        _select_hyperparameters_on_validation(
             config=config,
-            features=train_features,
-            labels=train_labels,
-            groups=training_groups,
-            dataset_name=config.DATASET_NAME,
+            fit_features=fit_features,
+            fit_labels=fit_labels,
+            validation_features=feature_frame.iloc[validation_indices],
+            validation_labels=labels[validation_indices],
         )
     )
     fitted_config = copy.copy(config)
@@ -847,9 +848,10 @@ def run_training(config: CFG) -> dict[str, object]:
             else None
         ),
         "hyperparameter_tuning_warning": (
-            "Hyperparameters are selected by inner cross-validation using "
-            "only each outer fold's training rows. Outer validation rows are "
-            "used only for evaluation."
+            "Each outer validation fold is used to select hyperparameters and "
+            "to calculate that fold's validation metrics. These internal CV "
+            "metrics are tuning results, not an independent performance "
+            "estimate. Use a separate untouched dataset for final evaluation."
             if config.HYPERPARAMETER_TUNING
             else None
         ),
@@ -857,12 +859,16 @@ def run_training(config: CFG) -> dict[str, object]:
         "artifact_directory": str(summary_dir),
         "fold_reports": fold_reports,
         "validation_metrics_interpretation": (
-            "Pooled out-of-fold predictions from five folds. B-cell folds hold "
-            "out complete proteins; SARS folds stratify peptides and share the "
-            "single source protein across folds."
+            "Pooled predictions from five folds. Each validation fold is also "
+            "used to select hyperparameters, so these metrics are tuning "
+            "results, not an independent performance estimate. B-cell folds "
+            "hold out complete proteins; SARS folds stratify peptides and "
+            "share the single source protein across folds."
             if config.DATASET_NAME.lower() == "sars"
-            else "Pooled out-of-fold predictions from five stratified "
-            "protein-group folds."
+            else "Pooled predictions from five stratified protein-group folds. "
+            "Each validation fold is also used to select hyperparameters, so "
+            "these metrics are tuning results, not an independent performance "
+            "estimate."
         ),
     }
     with (summary_dir / "cross_validation_metrics.json").open(

@@ -68,25 +68,18 @@ def _print_tuning_results(
         )
 
 
-def _select_hyperparameters_with_inner_cv(
+def _select_hyperparameters_on_validation(
     config: CFG,
-    features: pd.DataFrame,
-    labels: np.ndarray,
-    groups: np.ndarray,
-    dataset_name: str,
+    fit_features: pd.DataFrame,
+    fit_labels: np.ndarray,
+    validation_features: pd.DataFrame,
+    validation_labels: np.ndarray,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """Select hyperparameters using only inner folds of the outer train set."""
+    """Select hyperparameters by scoring candidates on the outer validation fold."""
     base_parameters = _configured_model_parameters(config)
     if not config.HYPERPARAMETER_TUNING:
         return base_parameters, []
 
-    folds, _ = make_cross_validation_splits(
-        labels,
-        groups,
-        dataset_name=dataset_name,
-        n_splits=5,
-        random_state=config.RANDOM_STATE,
-    )
     parameter_sets = [base_parameters]
     parameter_sets.extend(
         {**base_parameters, **overrides}
@@ -102,30 +95,18 @@ def _select_hyperparameters_with_inner_cv(
         candidate_config.HYPERPARAMETER_TUNING = False
         candidate_config.validate()
 
-        oof_scores = np.full(len(labels), np.nan, dtype=float)
-        for train_indices, validation_indices in folds:
-            fit_features, fit_labels, _ = smote_resample(
-                features.iloc[train_indices],
-                labels[train_indices],
-                enabled=config.USE_SMOTE,
-                random_state=config.RANDOM_STATE,
-                k_neighbors=config.SMOTE_K_NEIGHBORS,
-            )
-            model = _build_configured_model(candidate_config)
-            model.fit(fit_features, fit_labels)
-            oof_scores[validation_indices] = model.predict_proba(
-                features.iloc[validation_indices]
-            )[:, 1]
-
-        oof_metrics = calculate_metrics(
-            labels,
-            oof_scores,
+        model = _build_configured_model(candidate_config)
+        model.fit(fit_features, fit_labels)
+        validation_scores = model.predict_proba(validation_features)[:, 1]
+        validation_metrics = calculate_metrics(
+            validation_labels,
+            validation_scores,
             threshold=config.PREDICTION_THRESHOLD,
         )
-        score = float(oof_metrics[config.HYPERPARAMETER_TUNING_METRIC])
+        score = float(validation_metrics[config.HYPERPARAMETER_TUNING_METRIC])
         if not np.isfinite(score):
             raise ValueError(
-                "Inner-fold hyperparameter tuning produced a non-finite "
+                "Outer-validation hyperparameter selection produced a non-finite "
                 f"{config.HYPERPARAMETER_TUNING_METRIC} for candidate "
                 f"{candidate_index}."
             )
@@ -135,7 +116,7 @@ def _select_hyperparameters_with_inner_cv(
                 "hyperparameters": parameters,
                 "selection_metric": config.HYPERPARAMETER_TUNING_METRIC,
                 "selection_score": score,
-                "oof_metrics": oof_metrics,
+                "validation_metrics": validation_metrics,
             }
         )
 
@@ -145,9 +126,9 @@ def _select_hyperparameters_with_inner_cv(
     )
     fold_number = getattr(config, "_CV_FOLD_NUMBER", None)
     tuning_scope = (
-        f"Internal hyperparameter tuning (outer fold {fold_number})"
+        f"Hyperparameter selection on outer validation fold {fold_number}"
         if fold_number is not None
-        else "Internal hyperparameter tuning"
+        else "Hyperparameter selection on validation fold"
     )
     _print_tuning_results(
         tuning_scope,
@@ -168,8 +149,8 @@ def _select_hyperparameters_with_inner_cv(
                 "selection_score": result["selection_score"],
                 "selected": result is best_candidate,
                 **{
-                    f"inner_oof_{name}": value
-                    for name, value in result["oof_metrics"].items()
+                    f"validation_{name}": value
+                    for name, value in result["validation_metrics"].items()
                 },
             }
         )
