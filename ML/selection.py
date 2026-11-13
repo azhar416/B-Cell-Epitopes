@@ -46,6 +46,28 @@ def _configured_model_parameters(config: CFG) -> dict[str, object]:
     }
 
 
+def _print_tuning_results(
+    title: str,
+    candidate_results: list[dict[str, object]],
+    *,
+    index_key: str,
+    parameters_key: str,
+    metric_key: str,
+    score_key: str,
+    selected_result: dict[str, object],
+) -> None:
+    """Print the score and parameters for every evaluated candidate."""
+    print(f"\n{title}")
+    print("Candidate | Selection metric | Score | Selected | Parameters")
+    for result in candidate_results:
+        selected = result is selected_result
+        print(
+            f"{result[index_key]} | {result[metric_key]} | "
+            f"{float(result[score_key]):.6f} | "
+            f"{'yes' if selected else 'no'} | {result[parameters_key]}"
+        )
+
+
 def _select_hyperparameters_with_inner_cv(
     config: CFG,
     features: pd.DataFrame,
@@ -119,6 +141,21 @@ def _select_hyperparameters_with_inner_cv(
     best_candidate = max(
         candidate_results,
         key=lambda result: result["selection_score"],
+    )
+    fold_number = getattr(config, "_CV_FOLD_NUMBER", None)
+    tuning_scope = (
+        f"Internal hyperparameter tuning (outer fold {fold_number})"
+        if fold_number is not None
+        else "Internal hyperparameter tuning"
+    )
+    _print_tuning_results(
+        tuning_scope,
+        candidate_results,
+        index_key="candidate_index",
+        parameters_key="hyperparameters",
+        metric_key="selection_metric",
+        score_key="selection_score",
+        selected_result=best_candidate,
     )
     comparison = []
     for result in candidate_results:
@@ -221,6 +258,15 @@ def _select_external_model_from_bcell(
         )
 
     selected = max(candidate_results, key=lambda result: result["selection_score"])
+    _print_tuning_results(
+        "External-model hyperparameter tuning on all B-cell data",
+        candidate_results,
+        index_key="candidate_id",
+        parameters_key="parameters",
+        metric_key="selection_metric",
+        score_key="selection_score",
+        selected_result=selected,
+    )
     comparison = [
         {
             "candidate_id": result["candidate_id"],
