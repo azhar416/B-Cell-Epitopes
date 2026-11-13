@@ -919,10 +919,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feature-set",
-        choices=("perbandingan_1", "proposed"),
+        choices=("perbandingan_1", "perbandingan_2", "proposed"),
         help=(
-            "Select length-only peptide/protein features from the paper, or "
-            "the current proposed feature engineering."
+            "Select the perbandingan_1 or perbandingan_2 paper feature profile, "
+            "or the current proposed feature engineering."
         ),
     )
     parser.add_argument(

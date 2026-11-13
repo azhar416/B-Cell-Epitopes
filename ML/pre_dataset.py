@@ -46,12 +46,16 @@ def build_feature_frame(
     use_aac_features: bool | None = None,
     use_dpc_features: bool | None = None,
 ) -> pd.DataFrame:
-    """Build the paper-based comparison profile or the proposed feature set."""
+    """Build one of the paper-based comparison profiles or proposed features."""
     if not isinstance(feature_set, str):
-        raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
+        raise ValueError(
+            "feature_set must be 'perbandingan_1', 'perbandingan_2', or 'proposed'."
+        )
     feature_set = feature_set.strip().lower().replace(" ", "_")
-    if feature_set not in {"perbandingan_1", "proposed"}:
-        raise ValueError("feature_set must be 'perbandingan_1' or 'proposed'.")
+    if feature_set not in {"perbandingan_1", "perbandingan_2", "proposed"}:
+        raise ValueError(
+            "feature_set must be 'perbandingan_1', 'perbandingan_2', or 'proposed'."
+        )
 
     if feature_set == "perbandingan_1":
         required_columns = {
@@ -87,6 +91,51 @@ def build_feature_frame(
                 "peptide_length": [len(sequence) for sequence in peptide_sequences],
                 "protein_length": [len(sequence) for sequence in protein_sequences],
                 "position": (end_positions - start_positions + 1).astype(float),
+            },
+            index=dataframe.index,
+        )
+        for column in DESCRIPTOR_COLUMNS:
+            features[column] = pd.to_numeric(dataframe[column], errors="coerce")
+        return features
+
+    if feature_set == "perbandingan_2":
+        required_columns = {
+            sequence_column,
+            "start_position",
+            "end_position",
+            *DESCRIPTOR_COLUMNS,
+        }
+        missing_columns = required_columns.difference(dataframe.columns)
+        if missing_columns:
+            raise ValueError(
+                "The perbandingan_2 feature set requires columns: "
+                f"{sorted(missing_columns)}."
+            )
+        # Validate peptide sequences even though peptide_length follows the
+        # paper's position formula rather than the sequence string length.
+        for index, value in dataframe[sequence_column].items():
+            normalize_sequence(value, row_label=index)
+        start_positions = pd.to_numeric(
+            dataframe["start_position"], errors="raise"
+        )
+        end_positions = pd.to_numeric(dataframe["end_position"], errors="raise")
+        if start_positions.isna().any() or end_positions.isna().any():
+            raise ValueError("Protein start/end positions must not be missing.")
+        if not (start_positions % 1 == 0).all() or not (
+            end_positions % 1 == 0
+        ).all():
+            raise ValueError("Protein start/end positions must be integers.")
+        if (start_positions < 1).any() or (end_positions < start_positions).any():
+            raise ValueError(
+                "Protein positions must be 1-based and end_position must be "
+                "greater than or equal to start_position."
+            )
+
+        features = pd.DataFrame(
+            {
+                "peptide_length": (
+                    end_positions - start_positions + 1
+                ).astype(float),
             },
             index=dataframe.index,
         )

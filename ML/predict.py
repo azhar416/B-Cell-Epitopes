@@ -47,7 +47,7 @@ def predict_peptides(
             or any(name in DESCRIPTOR_COLUMNS for name in feature_names),
         )
     )
-    if feature_profile == "perbandingan_1":
+    if feature_profile in {"perbandingan_1", "perbandingan_2"}:
         use_peptide_features = False
         use_protein_features = False
         use_biological_features = False
@@ -66,7 +66,7 @@ def predict_peptides(
             use_peptide_features and peptide_feature_type == "aac_dipeptide",
         )
     )
-    if feature_profile == "perbandingan_1":
+    if feature_profile in {"perbandingan_1", "perbandingan_2"}:
         use_aac_features = False
         use_dpc_features = False
     input_frame = pd.DataFrame({"peptide_seq": sequences})
@@ -126,6 +126,44 @@ def predict_peptides(
                 )
             for column in required_descriptors:
                 input_frame[column] = descriptor_data[column].to_numpy()
+    elif feature_profile == "perbandingan_2":
+        required_columns = {"start_position", "end_position"}
+        if protein_context_data is None:
+            raise ValueError(
+                "A perbandingan_2 model needs protein_context_data containing "
+                "start_position and end_position."
+            )
+        missing = required_columns.difference(protein_context_data.columns)
+        if missing:
+            raise ValueError(
+                "protein_context_data is missing required columns: "
+                f"{sorted(missing)}."
+            )
+        if len(protein_context_data) != len(input_frame):
+            raise ValueError(
+                "protein_context_data must have one row per peptide sequence."
+            )
+        if descriptor_data is None:
+            raise ValueError(
+                "A perbandingan_2 model needs descriptor_data containing: "
+                f"{list(DESCRIPTOR_COLUMNS)}."
+            )
+        missing_descriptors = set(DESCRIPTOR_COLUMNS).difference(
+            descriptor_data.columns
+        )
+        if missing_descriptors:
+            raise ValueError(
+                "descriptor_data is missing required columns: "
+                f"{sorted(missing_descriptors)}."
+            )
+        if len(descriptor_data) != len(input_frame):
+            raise ValueError(
+                "descriptor_data must have one row per peptide sequence."
+            )
+        for column in required_columns:
+            input_frame[column] = protein_context_data[column].to_numpy()
+        for column in DESCRIPTOR_COLUMNS:
+            input_frame[column] = descriptor_data[column].to_numpy()
     elif use_protein_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
