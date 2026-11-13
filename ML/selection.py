@@ -133,6 +133,7 @@ def _select_hyperparameters_with_inner_cv(
             {
                 "candidate_index": candidate_index,
                 "hyperparameters": parameters,
+                "selection_metric": config.HYPERPARAMETER_TUNING_METRIC,
                 "selection_score": score,
                 "oof_metrics": oof_metrics,
             }
