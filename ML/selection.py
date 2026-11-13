@@ -46,34 +46,31 @@ def _configured_model_parameters(config: CFG) -> dict[str, object]:
     }
 
 
-def _fit_and_score_candidates(
+def _select_hyperparameters_with_inner_cv(
     config: CFG,
-    fit_features: pd.DataFrame,
-    fit_labels: np.ndarray,
-    train_features: pd.DataFrame,
-    train_labels: np.ndarray,
-    validation_features: pd.DataFrame,
-    validation_labels: np.ndarray,
-) -> tuple[
-    object,
-    np.ndarray,
-    np.ndarray,
-    dict[str, float | int],
-    dict[str, float | int],
-    list[dict[str, object]],
-    dict[str, object],
-]:
-    """Fit configured hyperparameter candidates and select by validation score."""
+    features: pd.DataFrame,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    dataset_name: str,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Select hyperparameters using only inner folds of the outer train set."""
     base_parameters = _configured_model_parameters(config)
-    candidate_overrides = (
-        config.HYPERPARAMETER_TUNING_CANDIDATES[config.MODEL_TYPE]
-        if config.HYPERPARAMETER_TUNING
-        else []
+    if not config.HYPERPARAMETER_TUNING:
+        return base_parameters, []
+
+    folds, _ = make_cross_validation_splits(
+        labels,
+        groups,
+        dataset_name=dataset_name,
+        n_splits=5,
+        random_state=config.RANDOM_STATE,
     )
     parameter_sets = [base_parameters]
     parameter_sets.extend(
         {**base_parameters, **overrides}
-        for overrides in candidate_overrides
+        for overrides in config.HYPERPARAMETER_TUNING_CANDIDATES[
+            config.MODEL_TYPE
+        ]
     )
     candidate_results = []
     for candidate_index, parameters in enumerate(parameter_sets):
@@ -83,39 +80,39 @@ def _fit_and_score_candidates(
         candidate_config.HYPERPARAMETER_TUNING = False
         candidate_config.validate()
 
-        model = _build_configured_model(candidate_config)
-        model.fit(fit_features, fit_labels)
-        train_probabilities = model.predict_proba(train_features)[:, 1]
-        validation_probabilities = model.predict_proba(validation_features)[:, 1]
-        train_metrics = calculate_metrics(
-            train_labels,
-            train_probabilities,
+        oof_scores = np.full(len(labels), np.nan, dtype=float)
+        for train_indices, validation_indices in folds:
+            fit_features, fit_labels, _ = smote_resample(
+                features.iloc[train_indices],
+                labels[train_indices],
+                enabled=config.USE_SMOTE,
+                random_state=config.RANDOM_STATE,
+                k_neighbors=config.SMOTE_K_NEIGHBORS,
+            )
+            model = _build_configured_model(candidate_config)
+            model.fit(fit_features, fit_labels)
+            oof_scores[validation_indices] = model.predict_proba(
+                features.iloc[validation_indices]
+            )[:, 1]
+
+        oof_metrics = calculate_metrics(
+            labels,
+            oof_scores,
             threshold=config.PREDICTION_THRESHOLD,
         )
-        validation_metrics = calculate_metrics(
-            validation_labels,
-            validation_probabilities,
-            threshold=config.PREDICTION_THRESHOLD,
-        )
-        score = float(
-            validation_metrics[config.HYPERPARAMETER_TUNING_METRIC]
-        )
+        score = float(oof_metrics[config.HYPERPARAMETER_TUNING_METRIC])
         if not np.isfinite(score):
             raise ValueError(
-                "Hyperparameter tuning produced a non-finite validation "
+                "Inner-fold hyperparameter tuning produced a non-finite "
                 f"{config.HYPERPARAMETER_TUNING_METRIC} for candidate "
                 f"{candidate_index}."
             )
         candidate_results.append(
             {
                 "candidate_index": candidate_index,
-                "model": model,
-                "train_probabilities": train_probabilities,
-                "validation_probabilities": validation_probabilities,
-                "training_metrics": train_metrics,
-                "validation_metrics": validation_metrics,
                 "hyperparameters": parameters,
                 "selection_score": score,
+                "oof_metrics": oof_metrics,
             }
         )
 
@@ -133,25 +130,13 @@ def _fit_and_score_candidates(
                 "selection_score": result["selection_score"],
                 "selected": result is best_candidate,
                 **{
-                    f"validation_{name}": value
-                    for name, value in result["validation_metrics"].items()
-                },
-                **{
-                    f"training_{name}": value
-                    for name, value in result["training_metrics"].items()
+                    f"inner_oof_{name}": value
+                    for name, value in result["oof_metrics"].items()
                 },
             }
         )
 
-    return (
-        best_candidate["model"],
-        best_candidate["train_probabilities"],
-        best_candidate["validation_probabilities"],
-        best_candidate["training_metrics"],
-        best_candidate["validation_metrics"],
-        comparison if config.HYPERPARAMETER_TUNING else [],
-        best_candidate["hyperparameters"],
-    )
+    return best_candidate["hyperparameters"], comparison
 
 
 def _select_external_model_from_bcell(

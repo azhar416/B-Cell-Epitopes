@@ -25,7 +25,7 @@ from ML.dataset import (
 from ML.oversampling import smote_resample
 from ML.selection import (
     _build_configured_model,
-    _fit_and_score_candidates,
+    _select_hyperparameters_with_inner_cv,
     _select_external_model_from_bcell,
 )
 from ML.pre_dataset import build_feature_frame
@@ -180,7 +180,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             }
         )
     internal_fold_metrics = [
-        {"fold": fold["fold"], **fold["validation_metrics"]}
+        {
+            "fold": fold["fold"],
+            **fold["validation_metrics"],
+            "selected_hyperparameters": fold["selected_hyperparameters"],
+        }
         for fold in internal_cv_report["fold_metrics"]
     ]
 
@@ -209,9 +213,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "fold": internal_oof["fold"],
         }
     ).to_csv(output_dir / "bcell_oof_predictions.csv", index=False)
-    pd.DataFrame(internal_fold_metrics).to_csv(
-        output_dir / "bcell_fold_metrics.csv", index=False
-    )
+    pd.DataFrame(internal_fold_metrics).assign(
+        selected_hyperparameters=lambda frame: frame[
+            "selected_hyperparameters"
+        ].map(json.dumps)
+    ).to_csv(output_dir / "bcell_fold_metrics.csv", index=False)
     pd.DataFrame(candidate_comparison).assign(
         parameters=lambda frame: frame["parameters"].map(json.dumps)
     ).to_csv(output_dir / "bcell_model_selection.csv", index=False)
@@ -299,6 +305,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "configured_threshold": config.PREDICTION_THRESHOLD,
             "selected_threshold": selected_threshold,
             "threshold_selection_mcc": float(best_mcc),
+            "hyperparameter_comparison_path": internal_cv_report[
+                "hyperparameter_comparison_path"
+            ],
             "fold_metrics_path": str(output_dir / "bcell_fold_metrics.csv"),
             "predictions_path": str(output_dir / "bcell_oof_predictions.csv"),
             "evaluation_plots": bcell_plots,
@@ -464,22 +473,39 @@ def _run_training_single(
         )
     else:
         print("SMOTE disabled.")
-    (
-        model,
+    training_groups = dataframe.iloc[train_indices][
+        "parent_protein_id"
+    ].astype(str).to_numpy()
+    selected_hyperparameters, hyperparameter_comparison = (
+        _select_hyperparameters_with_inner_cv(
+            config=config,
+            features=train_features,
+            labels=train_labels,
+            groups=training_groups,
+            dataset_name=config.DATASET_NAME,
+        )
+    )
+    fitted_config = copy.copy(config)
+    for name, value in selected_hyperparameters.items():
+        setattr(fitted_config, name, value)
+    fitted_config.HYPERPARAMETER_TUNING = False
+    fitted_config.validate()
+
+    model = _build_configured_model(fitted_config)
+    model.fit(fit_features, fit_labels)
+    train_probabilities = model.predict_proba(train_features)[:, 1]
+    validation_probabilities = model.predict_proba(
+        feature_frame.iloc[validation_indices]
+    )[:, 1]
+    train_metrics = calculate_metrics(
+        train_labels,
         train_probabilities,
+        threshold=config.PREDICTION_THRESHOLD,
+    )
+    validation_metrics = calculate_metrics(
+        labels[validation_indices],
         validation_probabilities,
-        train_metrics,
-        validation_metrics,
-        hyperparameter_comparison,
-        selected_hyperparameters,
-    ) = _fit_and_score_candidates(
-        config=config,
-        fit_features=fit_features,
-        fit_labels=fit_labels,
-        train_features=train_features,
-        train_labels=train_labels,
-        validation_features=feature_frame.iloc[validation_indices],
-        validation_labels=labels[validation_indices],
+        threshold=config.PREDICTION_THRESHOLD,
     )
     comparison_plot = save_train_validation_metrics_plot(
         train_metrics,
@@ -821,9 +847,9 @@ def run_training(config: CFG) -> dict[str, object]:
             else None
         ),
         "hyperparameter_tuning_warning": (
-            "Hyperparameters were selected using the same validation fold "
-            "reported for evaluation. Fold metrics and pooled out-of-fold "
-            "metrics may therefore be optimistic."
+            "Hyperparameters are selected by inner cross-validation using "
+            "only each outer fold's training rows. Outer validation rows are "
+            "used only for evaluation."
             if config.HYPERPARAMETER_TUNING
             else None
         ),

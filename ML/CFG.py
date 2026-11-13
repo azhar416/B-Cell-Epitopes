@@ -45,7 +45,7 @@ class CFG:
     LOGISTIC_REGRESSION_MAX_ITER: int = 2000
     SVM_C: float = 1.0
     SVM_GAMMA: str | float = "scale"
-    HYPERPARAMETER_TUNING: bool = False
+    HYPERPARAMETER_TUNING: bool = True
     HYPERPARAMETER_TUNING_METRIC: str = "pr_auc"
     HYPERPARAMETER_TUNING_CANDIDATES: dict[str, list[dict[str, object]]] = field(
         default_factory=lambda: {
