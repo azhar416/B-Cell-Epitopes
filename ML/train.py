@@ -87,8 +87,10 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         )
     sars_features = sars_features.reindex(columns=development_features.columns)
 
-    selection, candidate_comparison = _select_external_model_from_bcell(
-        config, development_features, labels, groups
+    selection, candidate_comparison, selected_model_bcell_oof_scores = (
+        _select_external_model_from_bcell(
+            config, development_features, labels, groups
+        )
     )
     final_config = copy.copy(config)
     for key, value in selection["parameters"].items():
@@ -148,12 +150,16 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         internal_oof_labels, bcell_oof_scores, threshold=0.5
     )
 
-    # Select the deployment threshold from the same-dataset OOF predictions.
-    # This keeps the threshold and the reported internal predictions aligned.
-    threshold_values = np.unique(np.r_[0.0, bcell_oof_scores, 1.0])
+    # Select the deployment threshold using OOF probabilities from the same
+    # globally selected hyperparameter configuration used for the final model.
+    threshold_values = np.unique(
+        np.r_[0.0, selected_model_bcell_oof_scores, 1.0]
+    )
     threshold_mcc = [
         calculate_metrics(
-            internal_oof_labels, bcell_oof_scores, threshold=float(value)
+            labels,
+            selected_model_bcell_oof_scores,
+            threshold=float(value),
         )["mcc"]
         for value in threshold_values
     ]
@@ -164,6 +170,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         if np.isclose(score, best_mcc)
     ]
     selected_threshold = min(tied_thresholds, key=lambda value: abs(value - 0.5))
+    threshold_selection_mcc = float(best_mcc)
     internal_oof_metrics_selected = calculate_metrics(
         internal_oof_labels, bcell_oof_scores, threshold=selected_threshold
     )
@@ -308,7 +315,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "oof_metrics_bcell_selected_threshold": internal_oof_metrics_selected,
             "configured_threshold": config.PREDICTION_THRESHOLD,
             "selected_threshold": selected_threshold,
-            "threshold_selection_mcc": float(best_mcc),
+            "threshold_selection_source": (
+                "Pooled B-cell out-of-fold predictions from the globally "
+                "selected hyperparameter candidate."
+            ),
+            "threshold_selection_mcc": threshold_selection_mcc,
             "hyperparameter_comparison_path": internal_cv_report[
                 "hyperparameter_comparison_path"
             ],
@@ -342,6 +353,10 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         },
         "class_weight": config.CLASS_WEIGHT,
         "prediction_threshold": selected_threshold,
+        "threshold_selection_source": (
+            "Pooled B-cell out-of-fold predictions from the globally selected "
+            "hyperparameter candidate."
+        ),
         "external_sars_metrics_threshold_0_5": metrics_at_05,
         "external_sars_metrics_bcell_selected_threshold": metrics_at_selected,
         "evaluation_plots": sars_plots,

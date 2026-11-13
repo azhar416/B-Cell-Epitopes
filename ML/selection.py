@@ -163,28 +163,9 @@ def _select_external_model_from_bcell(
     features: pd.DataFrame,
     labels: np.ndarray,
     groups: np.ndarray,
-) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """Select external-model parameters by pooled B-cell out-of-fold score."""
+) -> tuple[dict[str, object], list[dict[str, object]], np.ndarray]:
+    """Select parameters and return their pooled B-cell OOF probabilities."""
     base_parameters = _configured_model_parameters(config)
-    if not config.HYPERPARAMETER_TUNING:
-        return (
-            {
-                "parameters": base_parameters,
-                "selection_metric": None,
-                "selection_score": None,
-                "candidate_count": 1,
-            },
-            [
-                {
-                    "candidate_id": 0,
-                    "parameters": base_parameters,
-                    "selection_metric": None,
-                    "selection_score": None,
-                    "selected": True,
-                }
-            ],
-        )
-
     folds, _ = make_cross_validation_splits(
         labels,
         groups,
@@ -192,7 +173,11 @@ def _select_external_model_from_bcell(
         n_splits=5,
         random_state=config.RANDOM_STATE,
     )
-    overrides = config.HYPERPARAMETER_TUNING_CANDIDATES.get(config.MODEL_TYPE, [])
+    overrides = (
+        config.HYPERPARAMETER_TUNING_CANDIDATES.get(config.MODEL_TYPE, [])
+        if config.HYPERPARAMETER_TUNING
+        else []
+    )
     candidates = [base_parameters]
     candidates.extend(
         {**base_parameters, **override} for override in overrides
@@ -227,8 +212,16 @@ def _select_external_model_from_bcell(
             oof_scores,
             threshold=config.PREDICTION_THRESHOLD,
         )
-        selection_metric = config.HYPERPARAMETER_TUNING_METRIC
-        score = float(oof_metrics[selection_metric])
+        selection_metric = (
+            config.HYPERPARAMETER_TUNING_METRIC
+            if config.HYPERPARAMETER_TUNING
+            else None
+        )
+        score = (
+            float(oof_metrics[selection_metric])
+            if selection_metric is not None
+            else None
+        )
         candidate_results.append(
             {
                 "candidate_id": candidate_id,
@@ -236,19 +229,26 @@ def _select_external_model_from_bcell(
                 "selection_metric": selection_metric,
                 "selection_score": score,
                 "oof_metrics": oof_metrics,
+                "oof_scores": oof_scores,
             }
         )
 
-    selected = max(candidate_results, key=lambda result: result["selection_score"])
-    _print_tuning_results(
-        "External-model hyperparameter tuning on all B-cell data",
-        candidate_results,
-        index_key="candidate_id",
-        parameters_key="parameters",
-        metric_key="selection_metric",
-        score_key="selection_score",
-        selected_result=selected,
-    )
+    if config.HYPERPARAMETER_TUNING:
+        selected = max(
+            candidate_results,
+            key=lambda result: result["selection_score"],
+        )
+        _print_tuning_results(
+            "External-model hyperparameter tuning on all B-cell data",
+            candidate_results,
+            index_key="candidate_id",
+            parameters_key="parameters",
+            metric_key="selection_metric",
+            score_key="selection_score",
+            selected_result=selected,
+        )
+    else:
+        selected = candidate_results[0]
     comparison = [
         {
             "candidate_id": result["candidate_id"],
@@ -269,4 +269,4 @@ def _select_external_model_from_bcell(
         "selection_score": selected["selection_score"],
         "candidate_count": len(candidates),
     }
-    return selection, comparison
+    return selection, comparison, selected["oof_scores"]
