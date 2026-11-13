@@ -5,7 +5,11 @@ from pathlib import Path
 import pandas as pd
 from joblib import load
 
-from ML.pre_dataset import DESCRIPTOR_COLUMNS, build_feature_frame
+from ML.pre_dataset import (
+    DESCRIPTOR_COLUMNS,
+    PERBANDINGAN_3_DESCRIPTOR_COLUMNS,
+    build_feature_frame,
+)
 
 
 def predict_peptides(
@@ -47,7 +51,11 @@ def predict_peptides(
             or any(name in DESCRIPTOR_COLUMNS for name in feature_names),
         )
     )
-    if feature_profile in {"perbandingan_1", "perbandingan_2"}:
+    if feature_profile in {
+        "perbandingan_1",
+        "perbandingan_2",
+        "perbandingan_3",
+    }:
         use_peptide_features = False
         use_protein_features = False
         use_biological_features = False
@@ -66,7 +74,11 @@ def predict_peptides(
             use_peptide_features and peptide_feature_type == "aac_dipeptide",
         )
     )
-    if feature_profile in {"perbandingan_1", "perbandingan_2"}:
+    if feature_profile in {
+        "perbandingan_1",
+        "perbandingan_2",
+        "perbandingan_3",
+    }:
         use_aac_features = False
         use_dpc_features = False
     input_frame = pd.DataFrame({"peptide_seq": sequences})
@@ -164,6 +176,49 @@ def predict_peptides(
             input_frame[column] = protein_context_data[column].to_numpy()
         for column in DESCRIPTOR_COLUMNS:
             input_frame[column] = descriptor_data[column].to_numpy()
+    elif feature_profile == "perbandingan_3":
+        required_columns = {
+            "parent_protein_id",
+            "protein_seq",
+            "start_position",
+            "end_position",
+        }
+        if protein_context_data is None:
+            raise ValueError(
+                "A perbandingan_3 model needs protein_context_data containing "
+                f"{sorted(required_columns)}."
+            )
+        missing = required_columns.difference(protein_context_data.columns)
+        if missing:
+            raise ValueError(
+                "protein_context_data is missing required columns: "
+                f"{sorted(missing)}."
+            )
+        if len(protein_context_data) != len(input_frame):
+            raise ValueError(
+                "protein_context_data must have one row per peptide sequence."
+            )
+        if descriptor_data is None:
+            raise ValueError(
+                "A perbandingan_3 model needs descriptor_data containing: "
+                f"{list(PERBANDINGAN_3_DESCRIPTOR_COLUMNS)}."
+            )
+        missing_descriptors = set(PERBANDINGAN_3_DESCRIPTOR_COLUMNS).difference(
+            descriptor_data.columns
+        )
+        if missing_descriptors:
+            raise ValueError(
+                "descriptor_data is missing required columns: "
+                f"{sorted(missing_descriptors)}."
+            )
+        if len(descriptor_data) != len(input_frame):
+            raise ValueError(
+                "descriptor_data must have one row per peptide sequence."
+            )
+        for column in required_columns:
+            input_frame[column] = protein_context_data[column].to_numpy()
+        for column in PERBANDINGAN_3_DESCRIPTOR_COLUMNS:
+            input_frame[column] = descriptor_data[column].to_numpy()
     elif use_protein_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
@@ -194,6 +249,7 @@ def predict_peptides(
         feature_set=feature_profile,
         use_aac_features=use_aac_features,
         use_dpc_features=use_dpc_features,
+        parent_protein_id_mapping=bundle.get("parent_protein_id_mapping"),
     ).reindex(columns=feature_names)
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])

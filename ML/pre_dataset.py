@@ -17,6 +17,12 @@ DESCRIPTOR_COLUMNS = (
     "hydrophobicity",
     "stability",
 )
+PERBANDINGAN_3_DESCRIPTOR_COLUMNS = (
+    "hydrophobicity",
+    "isoelectric_point",
+    "emini",
+    "parker",
+)
 
 
 def normalize_sequence(value: object, row_label: object = "unknown") -> str:
@@ -45,16 +51,24 @@ def build_feature_frame(
     feature_set: str = "proposed",
     use_aac_features: bool | None = None,
     use_dpc_features: bool | None = None,
+    parent_protein_id_mapping: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """Build one of the paper-based comparison profiles or proposed features."""
     if not isinstance(feature_set, str):
         raise ValueError(
-            "feature_set must be 'perbandingan_1', 'perbandingan_2', or 'proposed'."
+            "feature_set must be 'perbandingan_1', 'perbandingan_2', "
+            "'perbandingan_3', or 'proposed'."
         )
     feature_set = feature_set.strip().lower().replace(" ", "_")
-    if feature_set not in {"perbandingan_1", "perbandingan_2", "proposed"}:
+    if feature_set not in {
+        "perbandingan_1",
+        "perbandingan_2",
+        "perbandingan_3",
+        "proposed",
+    }:
         raise ValueError(
-            "feature_set must be 'perbandingan_1', 'perbandingan_2', or 'proposed'."
+            "feature_set must be 'perbandingan_1', 'perbandingan_2', "
+            "'perbandingan_3', or 'proposed'."
         )
 
     if feature_set == "perbandingan_1":
@@ -141,6 +155,79 @@ def build_feature_frame(
         )
         for column in DESCRIPTOR_COLUMNS:
             features[column] = pd.to_numeric(dataframe[column], errors="coerce")
+        return features
+
+    if feature_set == "perbandingan_3":
+        required_columns = {
+            sequence_column,
+            "parent_protein_id",
+            "protein_seq",
+            "start_position",
+            "end_position",
+            *PERBANDINGAN_3_DESCRIPTOR_COLUMNS,
+        }
+        missing_columns = required_columns.difference(dataframe.columns)
+        if missing_columns:
+            raise ValueError(
+                "The perbandingan_3 feature set requires columns: "
+                f"{sorted(missing_columns)}."
+            )
+        peptide_sequences = [
+            normalize_sequence(value, row_label=index)
+            for index, value in dataframe[sequence_column].items()
+        ]
+        protein_sequences = [
+            normalize_sequence(value, row_label=index)
+            for index, value in dataframe["protein_seq"].items()
+        ]
+        protein_ids = dataframe["parent_protein_id"]
+        if protein_ids.isna().any():
+            raise ValueError("parent_protein_id must not contain missing values.")
+        protein_ids = protein_ids.astype(str)
+        if parent_protein_id_mapping is None:
+            categories = sorted(protein_ids.unique())
+            parent_protein_id_mapping = {
+                protein_id: category_index
+                for category_index, protein_id in enumerate(categories)
+            }
+        if any(not isinstance(value, int) for value in parent_protein_id_mapping.values()):
+            raise ValueError("parent_protein_id_mapping values must be integers.")
+
+        start_positions = pd.to_numeric(dataframe["start_position"], errors="raise")
+        end_positions = pd.to_numeric(dataframe["end_position"], errors="raise")
+        if start_positions.isna().any() or end_positions.isna().any():
+            raise ValueError("Protein start/end positions must not be missing.")
+        if not (start_positions % 1 == 0).all() or not (
+            end_positions % 1 == 0
+        ).all():
+            raise ValueError("Protein start/end positions must be integers.")
+        if (start_positions < 1).any() or (end_positions < start_positions).any():
+            raise ValueError(
+                "Protein positions must be 1-based and end_position must be "
+                "greater than or equal to start_position."
+            )
+
+        features = pd.DataFrame(
+            {
+                "parent_protein_id": [
+                    parent_protein_id_mapping.get(protein_id, -1)
+                    for protein_id in protein_ids
+                ],
+                "peptide_seq_length": [len(sequence) for sequence in peptide_sequences],
+                "hydrophobicity": pd.to_numeric(
+                    dataframe["hydrophobicity"], errors="coerce"
+                ),
+                "isoelectric_point": pd.to_numeric(
+                    dataframe["isoelectric_point"], errors="coerce"
+                ),
+                "emini": pd.to_numeric(dataframe["emini"], errors="coerce"),
+                "parker": pd.to_numeric(dataframe["parker"], errors="coerce"),
+                "end_position": end_positions.astype(float),
+                "start_position": start_positions.astype(float),
+                "protein_seq_length": [len(sequence) for sequence in protein_sequences],
+            },
+            index=dataframe.index,
+        )
         return features
 
     for name, enabled in (

@@ -31,7 +31,16 @@ from ML.selection import (
 from ML.pre_dataset import build_feature_frame
 
 
-def _build_configured_features(dataframe: pd.DataFrame, config: CFG) -> pd.DataFrame:
+def _build_configured_features(
+    dataframe: pd.DataFrame,
+    config: CFG,
+    parent_protein_id_mapping: dict[str, int] | None = None,
+) -> pd.DataFrame:
+    if config.FEATURE_SET == "perbandingan_3" and parent_protein_id_mapping is None:
+        identifiers = sorted(dataframe["parent_protein_id"].astype(str).unique())
+        parent_protein_id_mapping = {
+            identifier: index for index, identifier in enumerate(identifiers)
+        }
     return build_feature_frame(
         dataframe,
         use_peptide_features=config.USE_PEPTIDE_FEATURES,
@@ -41,6 +50,7 @@ def _build_configured_features(dataframe: pd.DataFrame, config: CFG) -> pd.DataF
         feature_set=config.FEATURE_SET,
         use_aac_features=config.EFFECTIVE_AAC_FEATURES,
         use_dpc_features=config.EFFECTIVE_DPC_FEATURES,
+        parent_protein_id_mapping=parent_protein_id_mapping,
     )
 
 
@@ -75,8 +85,18 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "The cleaned B-cell development set must contain both classes."
         )
 
-    development_features = _build_configured_features(development, config)
-    sars_features = _build_configured_features(sars, config)
+    parent_protein_id_mapping = None
+    if config.FEATURE_SET == "perbandingan_3":
+        identifiers = sorted(development["parent_protein_id"].astype(str).unique())
+        parent_protein_id_mapping = {
+            identifier: index for index, identifier in enumerate(identifiers)
+        }
+    development_features = _build_configured_features(
+        development, config, parent_protein_id_mapping
+    )
+    sars_features = _build_configured_features(
+        sars, config, parent_protein_id_mapping
+    )
     missing_features = development_features.columns.difference(sars_features.columns)
     extra_features = sars_features.columns.difference(development_features.columns)
     if len(missing_features) or len(extra_features):
@@ -289,6 +309,11 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
         "feature_columns": development_features.columns.tolist(),
+        "feature_selection_method": (
+            "paper_reported_rfe_subset"
+            if config.FEATURE_SET == "perbandingan_3"
+            else None
+        ),
         "bcell_rows_before_overlap_handling": int(len(bcell)),
         "bcell_rows_used_for_development": int(len(development)),
         "bcell_proteins_used_for_development": int(development.parent_protein_id.nunique()),
@@ -382,6 +407,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "model": final_model,
         "feature_names": development_features.columns.tolist(),
         "feature_profile": config.FEATURE_SET,
+        "parent_protein_id_mapping": parent_protein_id_mapping,
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
         "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
@@ -604,6 +630,16 @@ def _run_training_single(
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
         "feature_profile": config.FEATURE_SET,
+        "parent_protein_id_mapping": (
+            {
+                identifier: index
+                for index, identifier in enumerate(
+                    sorted(dataframe["parent_protein_id"].astype(str).unique())
+                )
+            }
+            if config.FEATURE_SET == "perbandingan_3"
+            else None
+        ),
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
         "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
@@ -627,6 +663,11 @@ def _run_training_single(
         "training_mode": config.TRAINING_MODE,
         "model": config.MODEL_TYPE,
         "feature_set": config.FEATURE_SET,
+        "feature_selection_method": (
+            "paper_reported_rfe_subset"
+            if config.FEATURE_SET == "perbandingan_3"
+            else None
+        ),
         "class_labels": {"0": "negative", "1": "positive"},
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
@@ -919,10 +960,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--feature-set",
-        choices=("perbandingan_1", "perbandingan_2", "proposed"),
+        choices=(
+            "perbandingan_1",
+            "perbandingan_2",
+            "perbandingan_3",
+            "proposed",
+        ),
         help=(
-            "Select the perbandingan_1 or perbandingan_2 paper feature profile, "
-            "or the current proposed feature engineering."
+            "Select a paper comparison feature profile or the current proposed "
+            "feature engineering."
         ),
     )
     parser.add_argument(
