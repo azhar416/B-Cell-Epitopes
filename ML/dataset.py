@@ -29,54 +29,43 @@ def _read_prottrans_embeddings(
     embedding_dir: str | Path | None,
 ) -> tuple[list[str], np.ndarray]:
     """Read precomputed ProtT5 mean vectors; never generate sequence embeddings."""
-    if embedding_dir is not None:
-        cache_dir = Path(embedding_dir)
-        cache_path = cache_dir / f"{dataset_name}_prott5.npz"
-        if not cache_path.is_file():
-            raise FileNotFoundError(
-                f"Precomputed BLMPred vectors not found: {cache_path}. "
-                "Expected a NumPy .npz with sequences, embeddings, model_name, "
-                "and tokenizer_name arrays."
-            )
-        with np.load(cache_path, allow_pickle=False) as cache:
-            required = {"sequences", "embeddings", "model_name", "tokenizer_name"}
-            missing = required.difference(cache.files)
-            if missing:
-                raise ValueError(
-                    f"{cache_path.name} is missing arrays: {sorted(missing)}."
-                )
-            sequences = cache["sequences"].astype(str).tolist()
-            embeddings = cache["embeddings"].astype(np.float32)
-            model_name = str(cache["model_name"].item())
-            tokenizer_name = str(cache["tokenizer_name"].item())
-    elif dataset_name == "bcell":
-        # Reuse the existing frozen ProtT5 cache created by EmbeddingML.
-        cache_dir = Path(__file__).resolve().parents[1] / "EmbeddingML" / "artifacts" / "RF"
-        required_files = (
-            "sequences.npy",
-            "embeddings.npy",
-            "model_name.npy",
-            "tokenizer_name.npy",
-        )
-        missing_files = [name for name in required_files if not (cache_dir / name).is_file()]
-        if missing_files:
-            raise FileNotFoundError(
-                "The default BLMPred B-cell ProtT5 cache is incomplete at "
-                f"{cache_dir}; missing {missing_files}. Set "
-                "PROTTRANS_EMBEDDING_DIR to a directory containing "
-                "bcell_prott5.npz and sars_prott5.npz."
-            )
+    ml_dir = Path(__file__).resolve().parent
+    cache_dir = (
+        Path(embedding_dir).resolve()
+        if embedding_dir is not None
+        else ml_dir / "assets" / "perbandingan_5"
+    )
+    try:
+        cache_dir.relative_to(ml_dir)
+    except ValueError as error:
+        raise ValueError(
+            "PROTTRANS_EMBEDDING_DIR must be inside the ML directory; "
+            f"received {cache_dir}."
+        ) from error
+
+    # The repository's B-cell cache is stored as four .npy files. SARS uses
+    # the same cache schema in one .npz file because it has a separate sequence set.
+    legacy_bcell_files = {
+        "sequences.npy",
+        "embeddings.npy",
+        "model_name.npy",
+        "tokenizer_name.npy",
+    }
+    if dataset_name == "bcell" and all(
+        (cache_dir / name).is_file() for name in legacy_bcell_files
+    ):
         sequences = np.load(cache_dir / "sequences.npy", allow_pickle=False).astype(str).tolist()
         embeddings = np.load(cache_dir / "embeddings.npy", allow_pickle=False).astype(np.float32)
         model_name = str(np.load(cache_dir / "model_name.npy", allow_pickle=False).item())
         tokenizer_name = str(np.load(cache_dir / "tokenizer_name.npy", allow_pickle=False).item())
     else:
-        cache_path = Path(data_dir) / "prott5_embeddings" / f"{dataset_name}_prott5.npz"
+        cache_path = cache_dir / f"{dataset_name}_prott5.npz"
         if not cache_path.is_file():
             raise FileNotFoundError(
-                "Precomputed SARS ProtT5 vectors are required for perbandingan_5. "
-                f"Expected {cache_path}, or set PROTTRANS_EMBEDDING_DIR to a "
-                "directory containing sars_prott5.npz."
+                f"Precomputed ProtT5 vectors not found: {cache_path}. Place "
+                f"{dataset_name}_prott5.npz in ML/assets/perbandingan_5. "
+                "The cache must contain sequences, embeddings, model_name, and "
+                "tokenizer_name arrays."
             )
         with np.load(cache_path, allow_pickle=False) as cache:
             required = {"sequences", "embeddings", "model_name", "tokenizer_name"}
@@ -167,11 +156,19 @@ def load_labeled_dataset(
     if feature_set == "perbandingan_4":
         bert_columns = get_bert_cls_columns(dataframe.columns)
         if not bert_columns:
+            ml_dir = Path(__file__).resolve().parent
             embedding_dir = (
-                Path(bert_embedding_dir)
+                Path(bert_embedding_dir).resolve()
                 if bert_embedding_dir is not None
-                else Path(data_dir) / "bert_embeddings"
+                else ml_dir / "assets" / "perbandingan_4"
             )
+            try:
+                embedding_dir.relative_to(ml_dir)
+            except ValueError as error:
+                raise ValueError(
+                    "BERT_EMBEDDING_DIR must be inside the ML directory; "
+                    f"received {embedding_dir}."
+                ) from error
             embedding_path = embedding_dir / f"{dataset_name}_bert_cls.csv"
             if not embedding_path.is_file():
                 raise FileNotFoundError(
