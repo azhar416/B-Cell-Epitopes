@@ -62,6 +62,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
         feature_set=config.FEATURE_SET,
         bert_embedding_dir=config.BERT_EMBEDDING_DIR,
+        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
     )
     sars = load_labeled_dataset(
         "sars",
@@ -69,6 +70,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
         feature_set=config.FEATURE_SET,
         bert_embedding_dir=config.BERT_EMBEDDING_DIR,
+        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
     )
     sars_sequences = set(sars["peptide_seq"])
     overlap_mask = bcell["peptide_seq"].isin(sars_sequences)
@@ -486,6 +488,7 @@ def _run_training_single(
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
         feature_set=config.FEATURE_SET,
         bert_embedding_dir=config.BERT_EMBEDDING_DIR,
+        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
     )
     feature_frame = _build_configured_features(dataframe, config)
     labels = dataframe["target"].to_numpy(dtype=int)
@@ -780,6 +783,7 @@ def run_training(config: CFG) -> dict[str, object]:
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
         feature_set=config.FEATURE_SET,
         bert_embedding_dir=config.BERT_EMBEDDING_DIR,
+        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
     )
     folds, split_strategy = make_cross_validation_splits(
         dataframe["target"].to_numpy(dtype=int),
@@ -981,6 +985,7 @@ def parse_args() -> argparse.Namespace:
             "perbandingan_2",
             "perbandingan_3",
             "perbandingan_4",
+            "perbandingan_5",
             "proposed",
         ),
         help=(
@@ -994,6 +999,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Directory containing precomputed <dataset>_bert_cls.csv files "
             "for perbandingan_4."
+        ),
+    )
+    parser.add_argument(
+        "--prottrans-embedding-dir",
+        type=Path,
+        help=(
+            "Directory containing bcell_prott5.npz and sars_prott5.npz "
+            "precomputed numerical embeddings for perbandingan_5."
         ),
     )
     parser.add_argument(
@@ -1049,6 +1062,8 @@ def main() -> None:
         config.FEATURE_SET = args.feature_set
     if args.bert_embedding_dir:
         config.BERT_EMBEDDING_DIR = args.bert_embedding_dir
+    if args.prottrans_embedding_dir:
+        config.PROTTRANS_EMBEDDING_DIR = args.prottrans_embedding_dir
     if args.peptide_features is not None:
         config.USE_PEPTIDE_FEATURES = args.peptide_features
     if args.protein_features is not None:

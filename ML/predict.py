@@ -15,14 +15,18 @@ from ML.pre_dataset import (
 )
 
 
+PROTTRANS_DIMENSION = 1024
+
+
 def predict_peptides(
     sequences: list[str],
     model_path: str | Path = "ML/artifacts/peptide_classifier.joblib",
     descriptor_data: pd.DataFrame | None = None,
     protein_context_data: pd.DataFrame | None = None,
     bert_embedding_data: pd.DataFrame | None = None,
+    prottrans_embedding_data: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Predict peptides from model inputs, including optional precomputed CLS vectors."""
+    """Predict with precomputed model inputs, including ProtT5 mean vectors."""
     model_path = Path(model_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Saved model not found: {model_path}")
@@ -135,6 +139,69 @@ def predict_peptides(
         ).sort_values("_input_order", kind="stable")
         if input_frame.loc[:, bert_columns].isna().any(axis=None):
             raise ValueError("bert_embedding_data is missing a requested peptide.")
+        input_frame = input_frame.drop(columns="_input_order").reset_index(drop=True)
+    elif feature_profile == "perbandingan_5":
+        input_frame["peptide_seq"] = [
+            normalize_sequence(value, row_label=index)
+            for index, value in input_frame["peptide_seq"].items()
+        ]
+        if prottrans_embedding_data is None:
+            raise ValueError(
+                "A perbandingan_5 model needs prottrans_embedding_data with "
+                "one row per unique peptide, keyed by peptide_seq and containing "
+                "prott5_0000...prott5_1023 numeric columns."
+            )
+        if "peptide_seq" not in prottrans_embedding_data.columns:
+            raise ValueError("prottrans_embedding_data must contain peptide_seq.")
+        embedding_columns = [f"prott5_{index:04d}" for index in range(PROTTRANS_DIMENSION)]
+        if tuple(feature_names) != tuple(embedding_columns):
+            raise ValueError(
+                "The saved perbandingan_5 model must use the ordered 1024-column "
+                "ProtT5 schema prott5_0000...prott5_1023."
+            )
+        missing_columns = set(embedding_columns).difference(
+            prottrans_embedding_data.columns
+        )
+        if missing_columns:
+            raise ValueError(
+                "prottrans_embedding_data is missing ProtT5 columns: "
+                f"{sorted(missing_columns)[:5]}"
+                f"{'...' if len(missing_columns) > 5 else ''}."
+            )
+        embedding_frame = prottrans_embedding_data.loc[
+            :, ["peptide_seq", *embedding_columns]
+        ].copy()
+        embedding_frame["peptide_seq"] = [
+            normalize_sequence(value, row_label=index)
+            for index, value in embedding_frame["peptide_seq"].items()
+        ]
+        if embedding_frame["peptide_seq"].duplicated().any():
+            raise ValueError(
+                "prottrans_embedding_data must have unique peptide_seq keys."
+            )
+        for column in embedding_columns:
+            embedding_frame[column] = pd.to_numeric(
+                embedding_frame[column], errors="raise"
+            )
+        if not np.isfinite(
+            embedding_frame.loc[:, embedding_columns].to_numpy(dtype=float)
+        ).all():
+            raise ValueError(
+                "prottrans_embedding_data contains non-finite feature values."
+            )
+        input_frame = input_frame.assign(
+            _input_order=range(len(input_frame))
+        ).merge(
+            embedding_frame,
+            on="peptide_seq",
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        ).sort_values("_input_order", kind="stable")
+        if input_frame.loc[:, embedding_columns].isna().any(axis=None):
+            raise ValueError(
+                "prottrans_embedding_data is missing a requested peptide."
+            )
         input_frame = input_frame.drop(columns="_input_order").reset_index(drop=True)
     if use_biological_features:
         if descriptor_data is None:

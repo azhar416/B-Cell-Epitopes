@@ -18,6 +18,94 @@ DATASET_FILENAMES = {
     "bcell": "input_bcell.csv",
     "sars": "input_sars.csv",
 }
+PROTTRANS_MODEL_NAME = "Rostlab/prot_t5_xl_half_uniref50-enc"
+PROTTRANS_TOKENIZER_NAME = "Rostlab/prot_t5_xl_uniref50"
+PROTTRANS_DIMENSION = 1024
+
+
+def _read_prottrans_embeddings(
+    dataset_name: str,
+    data_dir: str | Path,
+    embedding_dir: str | Path | None,
+) -> tuple[list[str], np.ndarray]:
+    """Read precomputed ProtT5 mean vectors; never generate sequence embeddings."""
+    if embedding_dir is not None:
+        cache_dir = Path(embedding_dir)
+        cache_path = cache_dir / f"{dataset_name}_prott5.npz"
+        if not cache_path.is_file():
+            raise FileNotFoundError(
+                f"Precomputed BLMPred vectors not found: {cache_path}. "
+                "Expected a NumPy .npz with sequences, embeddings, model_name, "
+                "and tokenizer_name arrays."
+            )
+        with np.load(cache_path, allow_pickle=False) as cache:
+            required = {"sequences", "embeddings", "model_name", "tokenizer_name"}
+            missing = required.difference(cache.files)
+            if missing:
+                raise ValueError(
+                    f"{cache_path.name} is missing arrays: {sorted(missing)}."
+                )
+            sequences = cache["sequences"].astype(str).tolist()
+            embeddings = cache["embeddings"].astype(np.float32)
+            model_name = str(cache["model_name"].item())
+            tokenizer_name = str(cache["tokenizer_name"].item())
+    elif dataset_name == "bcell":
+        # Reuse the existing frozen ProtT5 cache created by EmbeddingML.
+        cache_dir = Path(__file__).resolve().parents[1] / "EmbeddingML" / "artifacts" / "RF"
+        required_files = (
+            "sequences.npy",
+            "embeddings.npy",
+            "model_name.npy",
+            "tokenizer_name.npy",
+        )
+        missing_files = [name for name in required_files if not (cache_dir / name).is_file()]
+        if missing_files:
+            raise FileNotFoundError(
+                "The default BLMPred B-cell ProtT5 cache is incomplete at "
+                f"{cache_dir}; missing {missing_files}. Set "
+                "PROTTRANS_EMBEDDING_DIR to a directory containing "
+                "bcell_prott5.npz and sars_prott5.npz."
+            )
+        sequences = np.load(cache_dir / "sequences.npy", allow_pickle=False).astype(str).tolist()
+        embeddings = np.load(cache_dir / "embeddings.npy", allow_pickle=False).astype(np.float32)
+        model_name = str(np.load(cache_dir / "model_name.npy", allow_pickle=False).item())
+        tokenizer_name = str(np.load(cache_dir / "tokenizer_name.npy", allow_pickle=False).item())
+    else:
+        cache_path = Path(data_dir) / "prott5_embeddings" / f"{dataset_name}_prott5.npz"
+        if not cache_path.is_file():
+            raise FileNotFoundError(
+                "Precomputed SARS ProtT5 vectors are required for perbandingan_5. "
+                f"Expected {cache_path}, or set PROTTRANS_EMBEDDING_DIR to a "
+                "directory containing sars_prott5.npz."
+            )
+        with np.load(cache_path, allow_pickle=False) as cache:
+            required = {"sequences", "embeddings", "model_name", "tokenizer_name"}
+            missing = required.difference(cache.files)
+            if missing:
+                raise ValueError(
+                    f"{cache_path.name} is missing arrays: {sorted(missing)}."
+                )
+            sequences = cache["sequences"].astype(str).tolist()
+            embeddings = cache["embeddings"].astype(np.float32)
+            model_name = str(cache["model_name"].item())
+            tokenizer_name = str(cache["tokenizer_name"].item())
+
+    if model_name != PROTTRANS_MODEL_NAME or tokenizer_name != PROTTRANS_TOKENIZER_NAME:
+        raise ValueError(
+            "perbandingan_5 requires the ProtT5-XL-U50 encoder and tokenizer "
+            f"({PROTTRANS_MODEL_NAME!r}, {PROTTRANS_TOKENIZER_NAME!r}); got "
+            f"{model_name!r}, {tokenizer_name!r}."
+        )
+    if embeddings.ndim != 2 or embeddings.shape != (len(sequences), PROTTRANS_DIMENSION):
+        raise ValueError(
+            "ProtT5 embeddings must have shape "
+            f"(number_of_sequences, {PROTTRANS_DIMENSION}); got {embeddings.shape}."
+        )
+    if len(set(sequences)) != len(sequences):
+        raise ValueError("ProtT5 cache must contain one row per unique peptide.")
+    if not np.isfinite(embeddings).all():
+        raise ValueError("ProtT5 cache contains non-finite values.")
+    return sequences, embeddings
 
 
 def load_labeled_dataset(
@@ -26,6 +114,7 @@ def load_labeled_dataset(
     max_peptide_length: int = 20,
     feature_set: str = "proposed",
     bert_embedding_dir: str | Path | None = None,
+    prottrans_embedding_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load and clean a labeled CSV, retaining protein IDs for grouped splitting."""
     dataset_name = dataset_name.lower()
@@ -134,6 +223,35 @@ def load_labeled_dataset(
                 )
         elif len(bert_columns) != len(get_bert_cls_columns(dataframe.columns)):
             raise ValueError("Inconsistent BERT CLS feature columns in dataset.")
+
+    if feature_set == "perbandingan_5":
+        sequences, embeddings = _read_prottrans_embeddings(
+            dataset_name,
+            data_dir,
+            prottrans_embedding_dir,
+        )
+        embedding_columns = [f"prott5_{index:04d}" for index in range(embeddings.shape[1])]
+        embedding_frame = pd.DataFrame(embeddings, columns=embedding_columns)
+        embedding_frame.insert(0, "peptide_seq", [
+            normalize_sequence(value, row_label=index)
+            for index, value in enumerate(sequences)
+        ])
+        if embedding_frame["peptide_seq"].duplicated().any():
+            raise ValueError("ProtT5 cache has duplicate normalized peptide keys.")
+        dataframe = dataframe.merge(
+            embedding_frame,
+            on="peptide_seq",
+            how="left",
+            validate="one_to_one",
+            sort=False,
+        )
+        missing_embedding = dataframe[embedding_columns].isna().any(axis=1)
+        if missing_embedding.any():
+            missing_count = int(dataframe.loc[missing_embedding, "peptide_seq"].nunique())
+            raise ValueError(
+                f"ProtT5 cache is missing vectors for {missing_count:,} cleaned "
+                f"{dataset_name} peptide(s)."
+            )
 
     if dataframe.empty or dataframe["target"].nunique() != 2:
         raise ValueError("The cleaned dataset must contain examples of both classes.")

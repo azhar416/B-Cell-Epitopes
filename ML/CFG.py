@@ -13,6 +13,7 @@ class CFG:
     DATA_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "dataset")
     EVALUATION_DATA_DIR: Path | None = None
     BERT_EMBEDDING_DIR: Path | None = None
+    PROTTRANS_EMBEDDING_DIR: Path | None = None
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
     TRAINING_MODE: str = "external_sars"
@@ -111,7 +112,8 @@ class CFG:
         if not isinstance(self.FEATURE_SET, str):
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', 'perbandingan_4', or 'proposed'."
+                "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
+                "or 'proposed'."
             )
         self.FEATURE_SET = self.FEATURE_SET.strip().lower().replace(" ", "_")
         if self.FEATURE_SET not in {
@@ -119,11 +121,13 @@ class CFG:
             "perbandingan_2",
             "perbandingan_3",
             "perbandingan_4",
+            "perbandingan_5",
             "proposed",
         }:
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', 'perbandingan_4', or 'proposed'."
+                "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
+                "or 'proposed'."
             )
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
             raise ValueError("DATASET_NAME must be either 'bcell' or 'sars'.")

@@ -24,6 +24,7 @@ PERBANDINGAN_3_DESCRIPTOR_COLUMNS = (
     "parker",
 )
 BERT_CLS_PREFIX = "bert_cls_"
+PROTTRANS_PREFIX = "prott5_"
 
 
 def get_bert_cls_columns(columns) -> tuple[str, ...]:
@@ -75,7 +76,8 @@ def build_feature_frame(
     if not isinstance(feature_set, str):
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
-            "'perbandingan_3', 'perbandingan_4', or 'proposed'."
+            "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
+            "or 'proposed'."
         )
     feature_set = feature_set.strip().lower().replace(" ", "_")
     if feature_set not in {
@@ -83,11 +85,13 @@ def build_feature_frame(
         "perbandingan_2",
         "perbandingan_3",
         "perbandingan_4",
+        "perbandingan_5",
         "proposed",
     }:
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
-            "'perbandingan_3', 'perbandingan_4', or 'proposed'."
+            "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
+            "or 'proposed'."
         )
 
     if feature_set == "perbandingan_1":
@@ -266,6 +270,24 @@ def build_feature_frame(
             for index, value in features[sequence_column].items()
         ]
         for column in bert_columns:
+            features[column] = pd.to_numeric(features[column], errors="raise")
+        return features
+
+    if feature_set == "perbandingan_5":
+        embedding_columns = [
+            column
+            for column in dataframe.columns
+            if isinstance(column, str) and column.startswith(PROTTRANS_PREFIX)
+        ]
+        if len(embedding_columns) != 1024 or embedding_columns != [
+            f"prott5_{index:04d}" for index in range(1024)
+        ]:
+            raise ValueError(
+                "The perbandingan_5 feature set requires 1024 ordered "
+                "ProtT5 mean-embedding columns named prott5_0000...prott5_1023."
+            )
+        features = dataframe.loc[:, embedding_columns].copy()
+        for column in embedding_columns:
             features[column] = pd.to_numeric(features[column], errors="raise")
         return features
 
