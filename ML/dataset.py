@@ -11,7 +11,7 @@ from sklearn.model_selection import (
     train_test_split,
 )
 
-from ML.pre_dataset import normalize_sequence
+from ML.pre_dataset import get_bert_cls_columns, normalize_sequence
 
 
 DATASET_FILENAMES = {
@@ -24,6 +24,8 @@ def load_labeled_dataset(
     dataset_name: str = "bcell",
     data_dir: str | Path = "dataset",
     max_peptide_length: int = 20,
+    feature_set: str = "proposed",
+    bert_embedding_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load and clean a labeled CSV, retaining protein IDs for grouped splitting."""
     dataset_name = dataset_name.lower()
@@ -72,6 +74,66 @@ def load_labeled_dataset(
     duplicate = dataframe["peptide_seq"].duplicated(keep="first")
     removed_duplicates = int(duplicate.sum())
     dataframe = dataframe.loc[~duplicate].reset_index(drop=True)
+
+    if feature_set == "perbandingan_4":
+        bert_columns = get_bert_cls_columns(dataframe.columns)
+        if not bert_columns:
+            embedding_dir = (
+                Path(bert_embedding_dir)
+                if bert_embedding_dir is not None
+                else Path(data_dir) / "bert_embeddings"
+            )
+            embedding_path = embedding_dir / f"{dataset_name}_bert_cls.csv"
+            if not embedding_path.is_file():
+                raise FileNotFoundError(
+                    "perbandingan_4 requires precomputed CLS vectors. Put a CSV "
+                    f"with peptide_seq and bert_cls_000... columns at {embedding_path}."
+                )
+            embeddings = pd.read_csv(embedding_path)
+            if "peptide_seq" not in embeddings.columns:
+                raise ValueError(
+                    f"{embedding_path.name} must contain a peptide_seq key column."
+                )
+            bert_columns = get_bert_cls_columns(embeddings.columns)
+            if not bert_columns:
+                raise ValueError(
+                    f"{embedding_path.name} has no bert_cls_000, bert_cls_001, ... columns."
+                )
+            embeddings = embeddings.loc[:, ["peptide_seq", *bert_columns]].copy()
+            embeddings["peptide_seq"] = [
+                normalize_sequence(value, row_label=index)
+                for index, value in embeddings["peptide_seq"].items()
+            ]
+            if embeddings["peptide_seq"].duplicated().any():
+                raise ValueError(
+                    f"{embedding_path.name} must have one row per unique peptide_seq."
+                )
+            for column in bert_columns:
+                embeddings[column] = pd.to_numeric(
+                    embeddings[column], errors="raise"
+                )
+            if not np.isfinite(embeddings.loc[:, bert_columns].to_numpy(dtype=float)).all():
+                raise ValueError(
+                    f"{embedding_path.name} contains non-finite CLS feature values."
+                )
+            dataframe = dataframe.merge(
+                embeddings,
+                on="peptide_seq",
+                how="left",
+                validate="many_to_one",
+                sort=False,
+            )
+            missing_embedding = dataframe[list(bert_columns)].isna().any(axis=1)
+            if missing_embedding.any():
+                missing_sequences = dataframe.loc[
+                    missing_embedding, "peptide_seq"
+                ].drop_duplicates()
+                raise ValueError(
+                    f"{embedding_path.name} is missing CLS vectors for "
+                    f"{len(missing_sequences):,} cleaned dataset peptide(s)."
+                )
+        elif len(bert_columns) != len(get_bert_cls_columns(dataframe.columns)):
+            raise ValueError("Inconsistent BERT CLS feature columns in dataset.")
 
     if dataframe.empty or dataframe["target"].nunique() != 2:
         raise ValueError("The cleaned dataset must contain examples of both classes.")

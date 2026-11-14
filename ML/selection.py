@@ -26,6 +26,13 @@ def _build_configured_model(config: CFG):
         logistic_regression_max_iter=config.LOGISTIC_REGRESSION_MAX_ITER,
         svm_c=config.SVM_C,
         svm_gamma=config.SVM_GAMMA,
+        xgboost_estimators=config.XGBOOST_ESTIMATORS,
+        xgboost_max_depth=config.XGBOOST_MAX_DEPTH,
+        xgboost_learning_rate=config.XGBOOST_LEARNING_RATE,
+        xgboost_subsample=config.XGBOOST_SUBSAMPLE,
+        xgboost_colsample_bytree=config.XGBOOST_COLSAMPLE_BYTREE,
+        xgboost_scale_pos_weight=config.XGBOOST_SCALE_POS_WEIGHT,
+        feature_set=config.FEATURE_SET,
     )
 
 
@@ -37,6 +44,15 @@ def _configured_model_parameters(config: CFG) -> dict[str, object]:
         }
     if config.MODEL_TYPE == "svm":
         return {"SVM_C": config.SVM_C, "SVM_GAMMA": config.SVM_GAMMA}
+    if config.MODEL_TYPE == "xgboost":
+        return {
+            "XGBOOST_ESTIMATORS": config.XGBOOST_ESTIMATORS,
+            "XGBOOST_MAX_DEPTH": config.XGBOOST_MAX_DEPTH,
+            "XGBOOST_LEARNING_RATE": config.XGBOOST_LEARNING_RATE,
+            "XGBOOST_SUBSAMPLE": config.XGBOOST_SUBSAMPLE,
+            "XGBOOST_COLSAMPLE_BYTREE": config.XGBOOST_COLSAMPLE_BYTREE,
+            "XGBOOST_SCALE_POS_WEIGHT": config.XGBOOST_SCALE_POS_WEIGHT,
+        }
     return {
         "RANDOM_FOREST_TREES": config.RANDOM_FOREST_TREES,
         "TREE_MAX_DEPTH": config.TREE_MAX_DEPTH,

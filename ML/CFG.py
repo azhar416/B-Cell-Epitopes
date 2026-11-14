@@ -12,6 +12,7 @@ class CFG:
     DATASET_NAME: str = "bcell"
     DATA_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "dataset")
     EVALUATION_DATA_DIR: Path | None = None
+    BERT_EMBEDDING_DIR: Path | None = None
     OUTPUT_DIR: Path = field(default_factory=lambda: PROJECT_ROOT / "ML" / "artifacts")
     MODEL_TYPE: str = "logistic_regression"
     TRAINING_MODE: str = "external_sars"
@@ -32,7 +33,7 @@ class CFG:
     PREDICTION_THRESHOLD: float = 0.5
 
     # Tree models: useful sweeps include 300/500 trees, depth 8/12/None,
-    # and leaf sizes 2/5/10/20.
+    # and leaf sizes 2/5/10/20. XGBoost has a separate search space below.
     RANDOM_FOREST_TREES: int = 300  # Also sets n_estimators for ExtraTrees.
     TREE_MAX_DEPTH: int | None = None
     TREE_MIN_SAMPLES_LEAF: int = 2
@@ -45,6 +46,12 @@ class CFG:
     LOGISTIC_REGRESSION_MAX_ITER: int = 2000
     SVM_C: float = 1.0
     SVM_GAMMA: str | float = "scale"
+    XGBOOST_ESTIMATORS: int = 300
+    XGBOOST_MAX_DEPTH: int = 6
+    XGBOOST_LEARNING_RATE: float = 0.1
+    XGBOOST_SUBSAMPLE: float = 1.0
+    XGBOOST_COLSAMPLE_BYTREE: float = 1.0
+    XGBOOST_SCALE_POS_WEIGHT: float = 1.0
     HYPERPARAMETER_TUNING: bool = True
     HYPERPARAMETER_TUNING_METRIC: str = "pr_auc"
     HYPERPARAMETER_TUNING_CANDIDATES: dict[str, list[dict[str, object]]] = field(
@@ -74,6 +81,12 @@ class CFG:
                 {"RANDOM_FOREST_TREES": 500},
                 {"TREE_MAX_FEATURES": "log2"},
             ],
+            "xgboost": [
+                {"XGBOOST_MAX_DEPTH": 3},
+                {"XGBOOST_MAX_DEPTH": 9},
+                {"XGBOOST_LEARNING_RATE": 0.03},
+                {"XGBOOST_LEARNING_RATE": 0.3},
+            ],
         }
     )
 
@@ -98,18 +111,19 @@ class CFG:
         if not isinstance(self.FEATURE_SET, str):
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', or 'proposed'."
+                "'perbandingan_3', 'perbandingan_4', or 'proposed'."
             )
         self.FEATURE_SET = self.FEATURE_SET.strip().lower().replace(" ", "_")
         if self.FEATURE_SET not in {
             "perbandingan_1",
             "perbandingan_2",
             "perbandingan_3",
+            "perbandingan_4",
             "proposed",
         }:
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', or 'proposed'."
+                "'perbandingan_3', 'perbandingan_4', or 'proposed'."
             )
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
             raise ValueError("DATASET_NAME must be either 'bcell' or 'sars'.")
@@ -117,11 +131,12 @@ class CFG:
             "logistic_regression",
             "random_forest",
             "extra_trees",
+            "xgboost",
             "svm",
         }:
             raise ValueError(
                 "MODEL_TYPE must be logistic_regression, random_forest, "
-                "extra_trees, or svm."
+                "extra_trees, xgboost, or svm."
             )
         self.MODEL_TYPE = self.MODEL_TYPE.lower()
         if not isinstance(self.TRAINING_MODE, str):
@@ -169,6 +184,12 @@ class CFG:
             )
         ):
             raise ValueError("At least one feature group must be enabled.")
+        if self.FEATURE_SET == "perbandingan_4" and self.USE_SMOTE:
+            raise ValueError(
+                "USE_SMOTE is not supported for perbandingan_4 because the "
+                "BERT features are precomputed and the Liu feature profile "
+                "uses its own fixed AAC/AAP/AAT representation."
+            )
         if not 0 < self.VALIDATION_SIZE < 1:
             raise ValueError("VALIDATION_SIZE must be between 0 and 1.")
         if self.SMOTE_K_NEIGHBORS < 1:
@@ -234,6 +255,18 @@ class CFG:
             raise ValueError("LOGISTIC_REGRESSION_MAX_ITER must be positive.")
         if self.SVM_C <= 0:
             raise ValueError("SVM_C must be positive.")
+        if self.XGBOOST_ESTIMATORS < 1:
+            raise ValueError("XGBOOST_ESTIMATORS must be positive.")
+        if self.XGBOOST_MAX_DEPTH < 1:
+            raise ValueError("XGBOOST_MAX_DEPTH must be positive.")
+        if not 0 < self.XGBOOST_LEARNING_RATE <= 1:
+            raise ValueError("XGBOOST_LEARNING_RATE must be in (0, 1].")
+        if not 0 < self.XGBOOST_SUBSAMPLE <= 1:
+            raise ValueError("XGBOOST_SUBSAMPLE must be in (0, 1].")
+        if not 0 < self.XGBOOST_COLSAMPLE_BYTREE <= 1:
+            raise ValueError("XGBOOST_COLSAMPLE_BYTREE must be in (0, 1].")
+        if self.XGBOOST_SCALE_POS_WEIGHT <= 0:
+            raise ValueError("XGBOOST_SCALE_POS_WEIGHT must be positive.")
         if not isinstance(self.SVM_GAMMA, (str, float, int)):
             raise ValueError("SVM_GAMMA must be 'scale', 'auto', or a positive number.")
         if isinstance(self.SVM_GAMMA, str) and self.SVM_GAMMA not in {"scale", "auto"}:
@@ -271,6 +304,14 @@ class CFG:
                 "TREE_MIN_SAMPLES_LEAF",
                 "TREE_MIN_SAMPLES_SPLIT",
                 "TREE_MAX_FEATURES",
+            },
+            "xgboost": {
+                "XGBOOST_ESTIMATORS",
+                "XGBOOST_MAX_DEPTH",
+                "XGBOOST_LEARNING_RATE",
+                "XGBOOST_SUBSAMPLE",
+                "XGBOOST_COLSAMPLE_BYTREE",
+                "XGBOOST_SCALE_POS_WEIGHT",
             },
         }
         for model_type, candidates in self.HYPERPARAMETER_TUNING_CANDIDATES.items():

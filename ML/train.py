@@ -57,12 +57,18 @@ def _build_configured_features(
 def _run_external_sars(config: CFG) -> dict[str, object]:
     """Fit/choose exclusively on B-cell, then evaluate all SARS rows once."""
     bcell = load_labeled_dataset(
-        "bcell", config.DATA_DIR, max_peptide_length=config.MAX_PEPTIDE_LENGTH
+        "bcell",
+        config.DATA_DIR,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        feature_set=config.FEATURE_SET,
+        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
     )
     sars = load_labeled_dataset(
         "sars",
         config.EVALUATION_DATA_DIR or config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        feature_set=config.FEATURE_SET,
+        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
     )
     sars_sequences = set(sars["peptide_seq"])
     overlap_mask = bcell["peptide_seq"].isin(sars_sequences)
@@ -478,6 +484,8 @@ def _run_training_single(
         dataset_name=config.DATASET_NAME,
         data_dir=config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        feature_set=config.FEATURE_SET,
+        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
     )
     feature_frame = _build_configured_features(dataframe, config)
     labels = dataframe["target"].to_numpy(dtype=int)
@@ -770,6 +778,8 @@ def run_training(config: CFG) -> dict[str, object]:
         dataset_name=config.DATASET_NAME,
         data_dir=config.DATA_DIR,
         max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        feature_set=config.FEATURE_SET,
+        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
     )
     folds, split_strategy = make_cross_validation_splits(
         dataframe["target"].to_numpy(dtype=int),
@@ -956,7 +966,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=("logistic_regression", "random_forest", "extra_trees", "svm"),
+        choices=(
+            "logistic_regression",
+            "random_forest",
+            "extra_trees",
+            "svm",
+            "xgboost",
+        ),
     )
     parser.add_argument(
         "--feature-set",
@@ -964,11 +980,20 @@ def parse_args() -> argparse.Namespace:
             "perbandingan_1",
             "perbandingan_2",
             "perbandingan_3",
+            "perbandingan_4",
             "proposed",
         ),
         help=(
             "Select a paper comparison feature profile or the current proposed "
             "feature engineering."
+        ),
+    )
+    parser.add_argument(
+        "--bert-embedding-dir",
+        type=Path,
+        help=(
+            "Directory containing precomputed <dataset>_bert_cls.csv files "
+            "for perbandingan_4."
         ),
     )
     parser.add_argument(
@@ -1022,6 +1047,8 @@ def main() -> None:
         config.MODEL_TYPE = args.model
     if args.feature_set:
         config.FEATURE_SET = args.feature_set
+    if args.bert_embedding_dir:
+        config.BERT_EMBEDDING_DIR = args.bert_embedding_dir
     if args.peptide_features is not None:
         config.USE_PEPTIDE_FEATURES = args.peptide_features
     if args.protein_features is not None:

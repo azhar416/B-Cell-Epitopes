@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from joblib import load
 
@@ -9,6 +10,8 @@ from ML.pre_dataset import (
     DESCRIPTOR_COLUMNS,
     PERBANDINGAN_3_DESCRIPTOR_COLUMNS,
     build_feature_frame,
+    get_bert_cls_columns,
+    normalize_sequence,
 )
 
 
@@ -17,8 +20,9 @@ def predict_peptides(
     model_path: str | Path = "ML/artifacts/peptide_classifier.joblib",
     descriptor_data: pd.DataFrame | None = None,
     protein_context_data: pd.DataFrame | None = None,
+    bert_embedding_data: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Predict peptides, requiring optional descriptors and protein context."""
+    """Predict peptides from model inputs, including optional precomputed CLS vectors."""
     model_path = Path(model_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Saved model not found: {model_path}")
@@ -82,6 +86,56 @@ def predict_peptides(
         use_aac_features = False
         use_dpc_features = False
     input_frame = pd.DataFrame({"peptide_seq": sequences})
+    if feature_profile == "perbandingan_4":
+        input_frame["peptide_seq"] = [
+            normalize_sequence(value, row_label=index)
+            for index, value in input_frame["peptide_seq"].items()
+        ]
+        if bert_embedding_data is None:
+            raise ValueError(
+                "A perbandingan_4 model needs bert_embedding_data with one row "
+                "per sequence, keyed by peptide_seq and containing the saved "
+                "bert_cls_000... columns. Supply embeddings from the same "
+                "protein BERT encoder used for training."
+            )
+        if "peptide_seq" not in bert_embedding_data.columns:
+            raise ValueError("bert_embedding_data must contain peptide_seq.")
+        bert_columns = get_bert_cls_columns(bert_embedding_data.columns)
+        expected_columns = tuple(
+            name for name in feature_names if name.startswith("bert_cls_")
+        )
+        if not bert_columns or bert_columns != expected_columns:
+            raise ValueError(
+                "bert_embedding_data CLS columns must match the saved model "
+                "schema exactly and be ordered bert_cls_000..."
+            )
+        embedding_frame = bert_embedding_data.loc[
+            :, ["peptide_seq", *bert_columns]
+        ].copy()
+        embedding_frame["peptide_seq"] = [
+            normalize_sequence(value, row_label=index)
+            for index, value in embedding_frame["peptide_seq"].items()
+        ]
+        if embedding_frame["peptide_seq"].duplicated().any():
+            raise ValueError("bert_embedding_data must have unique peptide_seq keys.")
+        for column in bert_columns:
+            embedding_frame[column] = pd.to_numeric(
+                embedding_frame[column], errors="raise"
+            )
+        if not np.isfinite(embedding_frame.loc[:, bert_columns].to_numpy(dtype=float)).all():
+            raise ValueError("bert_embedding_data contains non-finite CLS values.")
+        input_frame = input_frame.assign(
+            _input_order=range(len(input_frame))
+        ).merge(
+            embedding_frame,
+            on="peptide_seq",
+            how="left",
+            validate="many_to_one",
+            sort=False,
+        ).sort_values("_input_order", kind="stable")
+        if input_frame.loc[:, bert_columns].isna().any(axis=None):
+            raise ValueError("bert_embedding_data is missing a requested peptide.")
+        input_frame = input_frame.drop(columns="_input_order").reset_index(drop=True)
     if use_biological_features:
         if descriptor_data is None:
             raise ValueError(

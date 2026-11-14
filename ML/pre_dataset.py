@@ -23,6 +23,24 @@ PERBANDINGAN_3_DESCRIPTOR_COLUMNS = (
     "emini",
     "parker",
 )
+BERT_CLS_PREFIX = "bert_cls_"
+
+
+def get_bert_cls_columns(columns) -> tuple[str, ...]:
+    """Return an ordered CLS embedding schema from a feature table."""
+    indexed_columns = []
+    for column in columns:
+        if not isinstance(column, str) or not column.startswith(BERT_CLS_PREFIX):
+            continue
+        suffix = column[len(BERT_CLS_PREFIX) :]
+        if not suffix.isdigit():
+            raise ValueError(f"Invalid BERT CLS feature column: {column!r}.")
+        indexed_columns.append((int(suffix), column))
+    indexed_columns.sort()
+    indices = [index for index, _ in indexed_columns]
+    if indices and indices != list(range(len(indices))):
+        raise ValueError("BERT CLS feature indices must be contiguous from zero.")
+    return tuple(column for _, column in indexed_columns)
 
 
 def normalize_sequence(value: object, row_label: object = "unknown") -> str:
@@ -57,18 +75,19 @@ def build_feature_frame(
     if not isinstance(feature_set, str):
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
-            "'perbandingan_3', or 'proposed'."
+            "'perbandingan_3', 'perbandingan_4', or 'proposed'."
         )
     feature_set = feature_set.strip().lower().replace(" ", "_")
     if feature_set not in {
         "perbandingan_1",
         "perbandingan_2",
         "perbandingan_3",
+        "perbandingan_4",
         "proposed",
     }:
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
-            "'perbandingan_3', or 'proposed'."
+            "'perbandingan_3', 'perbandingan_4', or 'proposed'."
         )
 
     if feature_set == "perbandingan_1":
@@ -228,6 +247,26 @@ def build_feature_frame(
             },
             index=dataframe.index,
         )
+        return features
+
+    if feature_set == "perbandingan_4":
+        bert_columns = get_bert_cls_columns(dataframe.columns)
+        if sequence_column not in dataframe.columns:
+            raise ValueError(
+                f"The perbandingan_4 feature set requires {sequence_column!r}."
+            )
+        if not bert_columns:
+            raise ValueError(
+                "The perbandingan_4 feature set requires precomputed BERT CLS "
+                "columns named bert_cls_000, bert_cls_001, and so on."
+            )
+        features = dataframe.loc[:, [sequence_column, *bert_columns]].copy()
+        features[sequence_column] = [
+            normalize_sequence(value, row_label=index)
+            for index, value in features[sequence_column].items()
+        ]
+        for column in bert_columns:
+            features[column] = pd.to_numeric(features[column], errors="raise")
         return features
 
     for name, enabled in (
