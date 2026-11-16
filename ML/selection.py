@@ -43,6 +43,20 @@ def resolve_scale_pos_weight(
     return negatives / positives
 
 
+def apply_parameters(config: CFG, parameters: dict[str, object]) -> CFG:
+    """Return a validated copy of ``config`` with ``parameters`` baked in.
+
+    Tuning is switched off on the copy: the parameters are now fixed, so any
+    downstream call must use them as given instead of searching again.
+    """
+    resolved = copy.copy(config)
+    for name, value in parameters.items():
+        setattr(resolved, name, value)
+    resolved.HYPERPARAMETER_TUNING = False
+    resolved.validate()
+    return resolved
+
+
 def _build_configured_model(config: CFG, fit_labels: np.ndarray | None = None):
     scale_pos_weight = (
         resolve_scale_pos_weight(config, fit_labels)
@@ -150,12 +164,7 @@ def _select_hyperparameters_on_validation(
     best_model = None
     best_score_so_far = -np.inf
     for candidate_index, parameters in enumerate(parameter_sets):
-        candidate_config = copy.copy(config)
-        for name, value in parameters.items():
-            setattr(candidate_config, name, value)
-        candidate_config.HYPERPARAMETER_TUNING = False
-        candidate_config.validate()
-
+        candidate_config = apply_parameters(config, parameters)
         model = _build_configured_model(candidate_config, fit_labels)
         model.fit(fit_features, fit_labels)
         validation_scores = model.predict_proba(validation_features)[:, 1]
@@ -257,12 +266,7 @@ def _select_external_model_from_bcell(
 
     candidate_results = []
     for candidate_id, parameters in enumerate(candidates):
-        candidate_config = copy.copy(config)
-        for key, value in parameters.items():
-            setattr(candidate_config, key, value)
-        candidate_config.HYPERPARAMETER_TUNING = False
-        candidate_config.validate()
-
+        candidate_config = apply_parameters(config, parameters)
         oof_scores = np.full(len(labels), np.nan, dtype=float)
         for train_indices, validation_indices in folds:
             fit_features, fit_labels, _ = smote_resample(

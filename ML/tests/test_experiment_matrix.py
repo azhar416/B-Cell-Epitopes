@@ -14,6 +14,8 @@ from ML.experiment_matrix import (
     MODEL_TYPES,
     ExperimentSpec,
     _configure_run,
+    _merge_with_existing_summary,
+    _write_summary,
     build_experiment_matrix,
     run_experiment_matrix,
 )
@@ -106,6 +108,65 @@ class ExperimentMatrixTests(unittest.TestCase):
             self.assertEqual(
                 {row["status"] for row in summary_rows}, {"success"}
             )
+
+
+class SummaryMergeTests(unittest.TestCase):
+    """Two invocations may share one output directory without losing rows."""
+
+    def _write(self, path, rows):
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["experiment_id", "status"])
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def test_existing_rows_from_another_run_survive(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            self._write(path, [{"experiment_id": "a", "status": "success"}])
+
+            merged = _merge_with_existing_summary(
+                path, [{"experiment_id": "b", "status": "success"}]
+            )
+
+            self.assertEqual(
+                {row["experiment_id"] for row in merged}, {"a", "b"}
+            )
+
+    def test_rerunning_an_experiment_replaces_its_row(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            self._write(path, [{"experiment_id": "a", "status": "failed"}])
+
+            merged = _merge_with_existing_summary(
+                path, [{"experiment_id": "a", "status": "success"}]
+            )
+
+            self.assertEqual(len(merged), 1)
+            self.assertEqual(merged[0]["status"], "success")
+
+    def test_write_summary_round_trips_through_an_existing_file(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            _write_summary(path, [{"experiment_id": "a", "status": "success"}])
+            _write_summary(path, [{"experiment_id": "b", "status": "success"}])
+
+            with path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+
+            self.assertEqual(
+                {row["experiment_id"] for row in rows}, {"a", "b"}
+            )
+
+    def test_a_corrupt_summary_does_not_abort_the_run(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            path.write_bytes(b"\x00\x01 not,a,csv\n\x00")
+
+            merged = _merge_with_existing_summary(
+                path, [{"experiment_id": "a", "status": "success"}]
+            )
+
+            self.assertEqual([row["experiment_id"] for row in merged], ["a"])
 
 
 if __name__ == "__main__":

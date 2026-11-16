@@ -332,7 +332,40 @@ def run_experiment_matrix(
     return rows
 
 
+def _merge_with_existing_summary(
+    path: Path, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fold ``rows`` into whatever the CSV already holds, keyed by experiment id.
+
+    Without this, a second invocation sharing the same output directory would
+    truncate the first one's results, because the file is rewritten in full on
+    every run. Rows from this process win, so a rerun updates its own entries
+    and leaves every other run's untouched.
+    """
+    if not path.exists():
+        return rows
+    try:
+        with path.open(newline="", encoding="utf-8") as summary_file:
+            existing = list(csv.DictReader(summary_file))
+    except (OSError, csv.Error):
+        # A corrupt or half-written summary must not block the run; the
+        # per-run metrics.json files remain the authoritative record.
+        return rows
+    # A row without an id cannot be matched against a rerun, so it is dropped
+    # rather than carried forward as an unidentifiable duplicate. This also
+    # covers a file whose header is not a summary header at all.
+    merged: dict[str, dict[str, Any]] = {
+        str(row["experiment_id"]): row
+        for row in existing
+        if row.get("experiment_id")
+    }
+    for row in rows:
+        merged[str(row["experiment_id"])] = row
+    return list(merged.values())
+
+
 def _write_summary(path: Path, rows: list[dict[str, Any]]) -> None:
+    rows = _merge_with_existing_summary(path, rows)
     columns = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", newline="", encoding="utf-8") as summary_file:
         writer = csv.DictWriter(summary_file, fieldnames=columns, extrasaction="ignore")

@@ -15,6 +15,7 @@ from ML.evaluation import (
     calculate_metrics,
     save_evaluation_plots,
     save_train_validation_metrics_plot,
+    select_threshold_by_mcc,
 )
 from ML.dataset import (
     make_cross_validation_splits,
@@ -27,8 +28,82 @@ from ML.selection import (
     _build_configured_model,
     _select_hyperparameters_on_validation,
     _select_external_model_from_bcell,
+    apply_parameters,
 )
 from ML.pre_dataset import build_feature_frame
+
+
+def _parent_protein_id_mapping(
+    dataframe: pd.DataFrame, config: CFG
+) -> dict[str, int] | None:
+    """Stable protein-id codes, which only perbandingan_3 feeds to the model.
+
+    Codes come from the sorted unique ids of the frame they are derived from,
+    so the same development set always yields the same mapping.
+    """
+    if config.FEATURE_SET != "perbandingan_3":
+        return None
+    identifiers = sorted(dataframe["parent_protein_id"].astype(str).unique())
+    return {identifier: index for index, identifier in enumerate(identifiers)}
+
+
+#: One console line per fitted model: display name, metric key, format spec.
+_REPORTED_METRICS = (
+    ("ROC-AUC", "roc_auc", ".4f"),
+    ("PR-AUC", "pr_auc", ".4f"),
+    ("Accuracy", "accuracy", ".4f"),
+    ("Recall", "recall", ".4f"),
+    ("Precision", "precision", ".4f"),
+    ("F1", "f1", ".4f"),
+    ("TN", "tn", "d"),
+    ("FP", "fp", "d"),
+    ("FN", "fn", "d"),
+    ("TP", "tp", "d"),
+    ("Balanced accuracy", "balanced_accuracy", ".4f"),
+    ("MCC", "mcc", ".4f"),
+)
+
+#: Rows of the external-evaluation comparison table.
+_SUMMARY_METRICS = (
+    ("roc_auc", "ROC-AUC"),
+    ("pr_auc", "PR-AUC (AP)"),
+    ("accuracy", "Accuracy"),
+    ("recall", "Recall / Sens."),
+    ("specificity", "Specificity"),
+    ("precision", "Precision"),
+    ("f1", "F1-Score"),
+    ("mcc", "MCC"),
+)
+
+
+def _format_metrics(label: str, metrics: dict[str, float | int]) -> str:
+    """One-line console summary of a fitted model's metrics."""
+    fields = ", ".join(
+        f"{name}={metrics[key]:{spec}}" for name, key, spec in _REPORTED_METRICS
+    )
+    return f"{label} {fields}"
+
+
+def _mean_and_std(
+    rows: list[dict[str, object]], skip: tuple[str, ...] = ()
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-metric mean and population SD across equally shaped metric dicts."""
+    names = [key for key in rows[0] if key not in skip]
+    return (
+        {name: float(np.mean([row[name] for row in rows])) for name in names},
+        {name: float(np.std([row[name] for row in rows])) for name in names},
+    )
+
+
+def _load_dataset(config: CFG, dataset_name: str, data_dir: Path) -> pd.DataFrame:
+    return load_labeled_dataset(
+        dataset_name,
+        data_dir,
+        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
+        feature_set=config.FEATURE_SET,
+        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
+        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
+    )
 
 
 def _build_configured_features(
@@ -36,11 +111,8 @@ def _build_configured_features(
     config: CFG,
     parent_protein_id_mapping: dict[str, int] | None = None,
 ) -> pd.DataFrame:
-    if config.FEATURE_SET == "perbandingan_3" and parent_protein_id_mapping is None:
-        identifiers = sorted(dataframe["parent_protein_id"].astype(str).unique())
-        parent_protein_id_mapping = {
-            identifier: index for index, identifier in enumerate(identifiers)
-        }
+    if parent_protein_id_mapping is None:
+        parent_protein_id_mapping = _parent_protein_id_mapping(dataframe, config)
     return build_feature_frame(
         dataframe,
         use_peptide_features=config.USE_PEPTIDE_FEATURES,
@@ -54,34 +126,126 @@ def _build_configured_features(
     )
 
 
-def _run_external_sars(config: CFG) -> dict[str, object]:
-    """Fit/choose exclusively on B-cell, then evaluate all SARS rows once."""
-    bcell = load_labeled_dataset(
-        "bcell",
-        config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        feature_set=config.FEATURE_SET,
-        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
-        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
-    )
-    sars = load_labeled_dataset(
-        "sars",
-        config.EVALUATION_DATA_DIR or config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        feature_set=config.FEATURE_SET,
-        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
-        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
-    )
-    sars_sequences = set(sars["peptide_seq"])
-    overlap_mask = bcell["peptide_seq"].isin(sars_sequences)
+def _audit_exact_overlap(
+    bcell: pd.DataFrame, sars: pd.DataFrame
+) -> tuple[dict[str, int], set[str]]:
+    """Count cleaned B-cell peptides that reappear verbatim in SARS.
+
+    These rows are deliberately retained on both sides, so the audit records
+    how far the external evaluation falls short of fully unseen data.
+    """
+    overlap_mask = bcell["peptide_seq"].isin(set(sars["peptide_seq"]))
     overlap_sequences = set(bcell.loc[overlap_mask, "peptide_seq"])
-    sars_labels_by_sequence = dict(zip(sars["peptide_seq"], sars["target"]))
-    bcell_labels_by_sequence = dict(zip(bcell["peptide_seq"], bcell["target"]))
-    same_label_overlap = sum(
-        bcell_labels_by_sequence[sequence] == sars_labels_by_sequence[sequence]
+    bcell_labels = dict(zip(bcell["peptide_seq"], bcell["target"]))
+    sars_labels = dict(zip(sars["peptide_seq"], sars["target"]))
+    same_label = sum(
+        bcell_labels[sequence] == sars_labels[sequence]
         for sequence in overlap_sequences
     )
-    conflicting_label_overlap = len(overlap_sequences) - same_label_overlap
+    audit = {
+        "unique_exact_peptide_sequences": len(overlap_sequences),
+        "same_label": int(same_label),
+        "opposite_label": int(len(overlap_sequences) - same_label),
+        "bcell_rows_retained_in_development": int(overlap_mask.sum()),
+        "sars_rows_retained_for_external_evaluation": int(len(sars)),
+    }
+    return audit, overlap_sequences
+
+
+def _align_external_features(
+    config: CFG, development: pd.DataFrame, sars: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int] | None]:
+    """Build both feature matrices under one schema and one protein mapping."""
+    mapping = _parent_protein_id_mapping(development, config)
+    development_features = _build_configured_features(development, config, mapping)
+    sars_features = _build_configured_features(sars, config, mapping)
+    missing_features = development_features.columns.difference(sars_features.columns)
+    extra_features = sars_features.columns.difference(development_features.columns)
+    if len(missing_features) or len(extra_features):
+        raise ValueError(
+            "B-cell and SARS feature schemas differ after feature generation. "
+            f"Missing in SARS: {missing_features.tolist()}; "
+            f"extra in SARS: {extra_features.tolist()}."
+        )
+    return (
+        development_features,
+        sars_features.reindex(columns=development_features.columns),
+        mapping,
+    )
+
+
+def _internal_cv_for_external(
+    config: CFG,
+    development: pd.DataFrame,
+    output_dir: Path,
+    selection: tuple[dict[str, object], list[dict[str, object]]],
+) -> tuple[dict[str, object], pd.DataFrame]:
+    """Run the same_dataset CV runner on B-cell and realign its OOF scores.
+
+    The hyperparameter selection made for the external model is handed over
+    rather than recomputed: both arms select on the same rows, folds and
+    candidates, so running it twice would only burn another 45 fits.
+    """
+    internal_config = copy.copy(config)
+    internal_config.TRAINING_MODE = "same_dataset"
+    internal_config.DATASET_NAME = "bcell"
+    internal_config.OUTPUT_DIR = output_dir / "internal_bcell_same_dataset"
+    report = run_training(internal_config, hyperparameter_selection=selection)
+
+    key_columns = ["peptide_seq", "target", "parent_protein_id"]
+    out_of_fold = pd.read_csv(report["out_of_fold_predictions"])
+    out_of_fold = development[key_columns].merge(
+        out_of_fold[key_columns + ["validation_probability", "fold"]],
+        on=key_columns,
+        how="left",
+        validate="one_to_one",
+        sort=False,
+    )
+    if out_of_fold["validation_probability"].isna().any():
+        raise RuntimeError(
+            "The same_dataset internal CV did not produce one OOF score for "
+            "every cleaned B-cell peptide."
+        )
+    return report, out_of_fold
+
+
+def _print_external_summary(
+    *,
+    selected_threshold: float,
+    internal_mean: dict[str, float],
+    internal_std: dict[str, float],
+    internal_pooled: dict[str, float | int],
+    sars_at_05: dict[str, float | int],
+    sars_at_selected: dict[str, float | int],
+) -> None:
+    """Print the internal-vs-external comparison table transcribed into the paper."""
+    print("\n" + "=" * 96)
+    print("EXPERIMENT EVALUATION SUMMARY: B-cell 5-Fold Group CV vs External SARS")
+    print("=" * 96)
+    print(
+        f"{'Metric':<16} | {'B-cell CV (Mean ± SD)':<24} | "
+        f"{'B-cell Pooled OOF':<18} | {'SARS (Thresh 0.5)':<18} | "
+        f"{'SARS (Thresh ' + f'{selected_threshold:.3f})':<20}"
+    )
+    print("-" * 96)
+    for key, name in _SUMMARY_METRICS:
+        print(
+            f"{name:<16} | {internal_mean.get(key, 0.0):.4f} ± "
+            f"{internal_std.get(key, 0.0):.4f}          | "
+            f"{internal_pooled.get(key, 0.0):<18.4f} | "
+            f"{sars_at_05.get(key, 0.0):<18.4f} | "
+            f"{sars_at_selected.get(key, 0.0):<20.4f}"
+        )
+    print("=" * 96 + "\n")
+
+
+def _run_external_sars(config: CFG) -> dict[str, object]:
+    """Fit/choose exclusively on B-cell, then evaluate all SARS rows once."""
+    bcell = _load_dataset(config, "bcell", config.DATA_DIR)
+    sars = _load_dataset(
+        config, "sars", config.EVALUATION_DATA_DIR or config.DATA_DIR
+    )
+    overlap_report, overlap_sequences = _audit_exact_overlap(bcell, sars)
 
     # Retain the complete cleaned B-cell dataset, including exact peptide
     # overlaps with SARS, for both internal selection and the final refit.
@@ -93,38 +257,16 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
             "The cleaned B-cell development set must contain both classes."
         )
 
-    parent_protein_id_mapping = None
-    if config.FEATURE_SET == "perbandingan_3":
-        identifiers = sorted(development["parent_protein_id"].astype(str).unique())
-        parent_protein_id_mapping = {
-            identifier: index for index, identifier in enumerate(identifiers)
-        }
-    development_features = _build_configured_features(
-        development, config, parent_protein_id_mapping
+    development_features, sars_features, parent_protein_id_mapping = (
+        _align_external_features(config, development, sars)
     )
-    sars_features = _build_configured_features(
-        sars, config, parent_protein_id_mapping
-    )
-    missing_features = development_features.columns.difference(sars_features.columns)
-    extra_features = sars_features.columns.difference(development_features.columns)
-    if len(missing_features) or len(extra_features):
-        raise ValueError(
-            "B-cell and SARS feature schemas differ after feature generation. "
-            f"Missing in SARS: {missing_features.tolist()}; "
-            f"extra in SARS: {extra_features.tolist()}."
-        )
-    sars_features = sars_features.reindex(columns=development_features.columns)
 
     selection, candidate_comparison, selected_model_bcell_oof_scores = (
         _select_external_model_from_bcell(
             config, development_features, labels, groups
         )
     )
-    final_config = copy.copy(config)
-    for key, value in selection["parameters"].items():
-        setattr(final_config, key, value)
-    final_config.HYPERPARAMETER_TUNING = False
-    final_config.validate()
+    final_config = apply_parameters(config, selection["parameters"])
 
     fit_features, fit_labels, synthetic_count = smote_resample(
         development_features,
@@ -140,37 +282,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     output_dir = config.OUTPUT_DIR / config.FEATURE_SET / "external_sars"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use the exact same internal-CV runner and aggregation as same_dataset.
-    # External model selection above remains separate because it chooses the
-    # final model to refit on all B-cell rows.
-    internal_cv_config = copy.copy(config)
-    internal_cv_config.TRAINING_MODE = "same_dataset"
-    internal_cv_config.DATASET_NAME = "bcell"
-    internal_cv_config.OUTPUT_DIR = output_dir / "internal_bcell_same_dataset"
-    internal_cv_report = run_training(internal_cv_config)
-    internal_oof = pd.read_csv(internal_cv_report["out_of_fold_predictions"])
-    internal_oof = development[
-        ["peptide_seq", "target", "parent_protein_id"]
-    ].merge(
-        internal_oof[
-            [
-                "peptide_seq",
-                "target",
-                "parent_protein_id",
-                "validation_probability",
-                "fold",
-            ]
-        ],
-        on=["peptide_seq", "target", "parent_protein_id"],
-        how="left",
-        validate="one_to_one",
-        sort=False,
+    internal_cv_report, internal_oof = _internal_cv_for_external(
+        config, development, output_dir, (selection, candidate_comparison)
     )
-    if internal_oof["validation_probability"].isna().any():
-        raise RuntimeError(
-            "The same_dataset internal CV did not produce one OOF score for "
-            "every cleaned B-cell peptide."
-        )
     bcell_oof_scores = internal_oof["validation_probability"].to_numpy(dtype=float)
     internal_oof_labels = internal_oof["target"].to_numpy(dtype=int)
     internal_oof_metrics = internal_cv_report["validation_metrics"]
@@ -178,42 +292,38 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         internal_oof_labels, bcell_oof_scores, threshold=0.5
     )
 
+    # The folds and the selection sweep refit the same candidate on the same
+    # rows, so their out-of-fold scores must agree; a drift here would mean the
+    # two arms have silently diverged.
+    oof_disagreement = float(
+        np.abs(bcell_oof_scores - selected_model_bcell_oof_scores).max()
+    )
+    if oof_disagreement > 1e-6:
+        print(
+            "WARNING: internal-CV and selection out-of-fold scores differ by "
+            f"up to {oof_disagreement:.3e}; the two arms are not running the "
+            "same configuration."
+        )
+
     # Select the deployment threshold using OOF probabilities from the same
     # globally selected hyperparameter configuration used for the final model.
-    threshold_values = np.unique(
-        np.r_[0.0, selected_model_bcell_oof_scores, 1.0]
+    selected_threshold, threshold_selection_mcc = select_threshold_by_mcc(
+        labels, selected_model_bcell_oof_scores
     )
-    threshold_mcc = [
-        calculate_metrics(
-            labels,
-            selected_model_bcell_oof_scores,
-            threshold=float(value),
-        )["mcc"]
-        for value in threshold_values
-    ]
-    best_mcc = max(threshold_mcc)
-    tied_thresholds = [
-        float(value)
-        for value, score in zip(threshold_values, threshold_mcc)
-        if np.isclose(score, best_mcc)
-    ]
-    selected_threshold = min(tied_thresholds, key=lambda value: abs(value - 0.5))
-    threshold_selection_mcc = float(best_mcc)
     internal_oof_metrics_selected = calculate_metrics(
         internal_oof_labels, bcell_oof_scores, threshold=selected_threshold
     )
-    internal_fold_metrics_selected = []
-    for fold_number, fold_frame in internal_oof.groupby("fold", sort=True):
-        fold_labels = fold_frame["target"].to_numpy(dtype=int)
-        fold_scores = fold_frame["validation_probability"].to_numpy(dtype=float)
-        internal_fold_metrics_selected.append(
-            {
-                "fold": int(fold_number),
-                **calculate_metrics(
-                    fold_labels, fold_scores, threshold=selected_threshold
-                ),
-            }
-        )
+    internal_fold_metrics_selected = [
+        {
+            "fold": int(fold_number),
+            **calculate_metrics(
+                fold_frame["target"].to_numpy(dtype=int),
+                fold_frame["validation_probability"].to_numpy(dtype=float),
+                threshold=selected_threshold,
+            ),
+        }
+        for fold_number, fold_frame in internal_oof.groupby("fold", sort=True)
+    ]
     internal_fold_metrics = [
         {
             "fold": fold["fold"],
@@ -222,22 +332,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         }
         for fold in internal_cv_report["fold_metrics"]
     ]
-
-    selected_metric_names = [
-        key for key in internal_fold_metrics_selected[0] if key != "fold"
-    ]
-    internal_mean_metrics_selected = {
-        metric: float(
-            np.mean([fold[metric] for fold in internal_fold_metrics_selected])
-        )
-        for metric in selected_metric_names
-    }
-    internal_std_metrics_selected = {
-        metric: float(
-            np.std([fold[metric] for fold in internal_fold_metrics_selected])
-        )
-        for metric in selected_metric_names
-    }
+    internal_mean_metrics_selected, internal_std_metrics_selected = _mean_and_std(
+        internal_fold_metrics_selected, skip=("fold",)
+    )
 
     pd.DataFrame(
         {
@@ -289,13 +386,6 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         prefix="external_sars_",
         title_prefix="External SARS",
     )
-    overlap_report = {
-        "unique_exact_peptide_sequences": len(overlap_sequences),
-        "same_label": int(same_label_overlap),
-        "opposite_label": int(conflicting_label_overlap),
-        "bcell_rows_retained_in_development": int(overlap_mask.sum()),
-        "sars_rows_retained_for_external_evaluation": int(len(sars)),
-    }
     report: dict[str, object] = {
         "training_mode": "external_sars",
         "training_dataset": "bcell",
@@ -430,44 +520,19 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     }
     dump(bundle, output_dir / "peptide_classifier.joblib")
 
-    print("\n" + "=" * 96)
-    print("EXPERIMENT EVALUATION SUMMARY: B-cell 5-Fold Group CV vs External SARS")
-    print("=" * 96)
-    print(
-        f"{'Metric':<16} | {'B-cell CV (Mean ± SD)':<24} | "
-        f"{'B-cell Pooled OOF':<18} | {'SARS (Thresh 0.5)':<18} | "
-        f"{'SARS (Thresh ' + f'{selected_threshold:.3f})':<20}"
+    _print_external_summary(
+        selected_threshold=selected_threshold,
+        internal_mean=internal_cv_report["mean_validation_metrics"],
+        internal_std=internal_cv_report["std_validation_metrics"],
+        internal_pooled=internal_oof_metrics,
+        sars_at_05=metrics_at_05,
+        sars_at_selected=metrics_at_selected,
     )
-    print("-" * 96)
-    summary_metrics = [
-        ("roc_auc", "ROC-AUC"),
-        ("pr_auc", "PR-AUC (AP)"),
-        ("accuracy", "Accuracy"),
-        ("recall", "Recall / Sens."),
-        ("specificity", "Specificity"),
-        ("precision", "Precision"),
-        ("f1", "F1-Score"),
-        ("mcc", "MCC"),
-    ]
-    for metric_key, metric_name in summary_metrics:
-        bcell_mean = internal_cv_report["mean_validation_metrics"].get(
-            metric_key, 0.0
-        )
-        bcell_std = internal_cv_report["std_validation_metrics"].get(
-            metric_key, 0.0
-        )
-        bcell_oof = internal_oof_metrics.get(metric_key, 0.0)
-        sars_05 = metrics_at_05.get(metric_key, 0.0)
-        sars_sel = metrics_at_selected.get(metric_key, 0.0)
-        print(
-            f"{metric_name:<16} | {bcell_mean:.4f} ± {bcell_std:.4f}          | "
-            f"{bcell_oof:<18.4f} | {sars_05:<18.4f} | {sars_sel:<20.4f}"
-        )
-    print("=" * 96 + "\n")
     print(
         f"External SARS evaluation complete: {len(sars):,} peptides from "
         f"{sars.parent_protein_id.nunique():,} protein(s); "
-        f"retained {int(overlap_mask.sum()):,} B-cell rows with "
+        f"retained {overlap_report['bcell_rows_retained_in_development']:,} "
+        "B-cell rows with "
         f"{len(overlap_sequences):,} exact SARS peptide overlaps in development."
     )
     print(f"Saved experiment artifacts to: {output_dir}")
@@ -482,14 +547,7 @@ def _run_training_single(
     """Run one training fold using the existing dataset-specific pipeline."""
     config.validate()
 
-    dataframe = load_labeled_dataset(
-        dataset_name=config.DATASET_NAME,
-        data_dir=config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        feature_set=config.FEATURE_SET,
-        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
-        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
-    )
+    dataframe = _load_dataset(config, config.DATASET_NAME, config.DATA_DIR)
     feature_frame = _build_configured_features(dataframe, config)
     labels = dataframe["target"].to_numpy(dtype=int)
     if supplied_split is not None:
@@ -538,11 +596,7 @@ def _run_training_single(
             validation_labels=labels[validation_indices],
         )
     )
-    fitted_config = copy.copy(config)
-    for name, value in selected_hyperparameters.items():
-        setattr(fitted_config, name, value)
-    fitted_config.HYPERPARAMETER_TUNING = False
-    fitted_config.validate()
+    fitted_config = apply_parameters(config, selected_hyperparameters)
 
     # Tuning already fitted the winner on exactly these rows and parameters.
     if selected_model is not None:
@@ -590,30 +644,8 @@ def _run_training_single(
         f"{dataframe.iloc[validation_indices]['parent_protein_id'].nunique():,} "
         "proteins)"
     )
-    print(
-        f"Training ROC-AUC={train_metrics['roc_auc']:.4f}, "
-        f"PR-AUC={train_metrics['pr_auc']:.4f}, "
-        f"Accuracy={train_metrics['accuracy']:.4f}, "
-        f"Recall={train_metrics['recall']:.4f}, "
-        f"Precision={train_metrics['precision']:.4f}, "
-        f"F1={train_metrics['f1']:.4f}, "
-        f"TN={train_metrics['tn']}, FP={train_metrics['fp']}, "
-        f"FN={train_metrics['fn']}, TP={train_metrics['tp']}, "
-        f"Balanced accuracy={train_metrics['balanced_accuracy']:.4f}, "
-        f"MCC={train_metrics['mcc']:.4f}"
-    )
-    print(
-        f"Validation ROC-AUC={validation_metrics['roc_auc']:.4f}, "
-        f"PR-AUC={validation_metrics['pr_auc']:.4f}, "
-        f"Accuracy={validation_metrics['accuracy']:.4f}, "
-        f"Recall={validation_metrics['recall']:.4f}, "
-        f"Precision={validation_metrics['precision']:.4f}, "
-        f"F1={validation_metrics['f1']:.4f}"
-        f", TN={validation_metrics['tn']}, FP={validation_metrics['fp']}, "
-        f"FN={validation_metrics['fn']}, TP={validation_metrics['tp']}, "
-        f"Balanced accuracy={validation_metrics['balanced_accuracy']:.4f}, "
-        f"MCC={validation_metrics['mcc']:.4f}"
-    )
+    print(_format_metrics("Training", train_metrics))
+    print(_format_metrics("Validation", validation_metrics))
 
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
@@ -645,16 +677,7 @@ def _run_training_single(
         "model": model,
         "feature_names": feature_frame.columns.tolist(),
         "feature_profile": config.FEATURE_SET,
-        "parent_protein_id_mapping": (
-            {
-                identifier: index
-                for index, identifier in enumerate(
-                    sorted(dataframe["parent_protein_id"].astype(str).unique())
-                )
-            }
-            if config.FEATURE_SET == "perbandingan_3"
-            else None
-        ),
+        "parent_protein_id_mapping": _parent_protein_id_mapping(dataframe, config),
         "use_peptide_features": config.USE_PEPTIDE_FEATURES,
         "use_aac_features": config.EFFECTIVE_AAC_FEATURES,
         "use_dpc_features": config.EFFECTIVE_DPC_FEATURES,
@@ -774,21 +797,24 @@ def _run_training_single(
     return report
 
 
-def run_training(config: CFG) -> dict[str, object]:
-    """Run five-fold CV, grouping proteins except for peptide-level SARS folds."""
+def run_training(
+    config: CFG,
+    hyperparameter_selection: tuple[
+        dict[str, object], list[dict[str, object]]
+    ] | None = None,
+) -> dict[str, object]:
+    """Run five-fold CV, grouping proteins except for peptide-level SARS folds.
+
+    ``hyperparameter_selection`` lets a caller that has already run the global
+    selection on exactly this dataset hand the result over instead of paying
+    for it twice; the external arm is the only such caller.
+    """
     config.validate()
     config.OUTPUT_DIR = Path(config.OUTPUT_DIR)
     if config.TRAINING_MODE == "external_sars":
         return _run_external_sars(config)
 
-    dataframe = load_labeled_dataset(
-        dataset_name=config.DATASET_NAME,
-        data_dir=config.DATA_DIR,
-        max_peptide_length=config.MAX_PEPTIDE_LENGTH,
-        feature_set=config.FEATURE_SET,
-        bert_embedding_dir=config.BERT_EMBEDDING_DIR,
-        prottrans_embedding_dir=config.PROTTRANS_EMBEDDING_DIR,
-    )
+    dataframe = _load_dataset(config, config.DATASET_NAME, config.DATA_DIR)
     folds, split_strategy = make_cross_validation_splits(
         dataframe["target"].to_numpy(dtype=int),
         dataframe["parent_protein_id"].to_numpy(),
@@ -808,21 +834,23 @@ def run_training(config: CFG) -> dict[str, object]:
     global_comparison: list[dict[str, object]] = []
     fold_base_config = config
     if config.HYPERPARAMETER_TUNING:
-        selection_features = _build_configured_features(dataframe, config)
-        global_selection, global_comparison, _ = _select_external_model_from_bcell(
-            config,
-            selection_features,
-            dataframe["target"].to_numpy(dtype=int),
-            dataframe["parent_protein_id"].astype(str).to_numpy(),
-            dataset_name=config.DATASET_NAME,
-        )
-        fold_base_config = copy.copy(config)
-        for name, value in global_selection["parameters"].items():
-            setattr(fold_base_config, name, value)
-        fold_base_config.HYPERPARAMETER_TUNING = False
-        fold_base_config.validate()
+        if hyperparameter_selection is not None:
+            global_selection, global_comparison = hyperparameter_selection
+            source = "Reusing hyperparameters selected by the caller"
+        else:
+            global_selection, global_comparison, _ = (
+                _select_external_model_from_bcell(
+                    config,
+                    _build_configured_features(dataframe, config),
+                    dataframe["target"].to_numpy(dtype=int),
+                    dataframe["parent_protein_id"].astype(str).to_numpy(),
+                    dataset_name=config.DATASET_NAME,
+                )
+            )
+            source = "Globally selected hyperparameters"
+        fold_base_config = apply_parameters(config, global_selection["parameters"])
         print(
-            "Globally selected hyperparameters "
+            f"{source} "
             f"({global_selection['selection_metric']}="
             f"{global_selection['selection_score']:.6f}): "
             f"{global_selection['parameters']}"
@@ -880,32 +908,12 @@ def run_training(config: CFG) -> dict[str, object]:
         out_of_fold_predictions["validation_probability"].to_numpy(dtype=float),
         threshold=config.PREDICTION_THRESHOLD,
     )
-    validation_metric_names = fold_reports[0]["validation_metrics"]
-    mean_validation_metrics = {
-        metric: float(
-            np.mean([report["validation_metrics"][metric] for report in fold_reports])
-        )
-        for metric in validation_metric_names
-    }
-    std_validation_metrics = {
-        metric: float(
-            np.std([report["validation_metrics"][metric] for report in fold_reports])
-        )
-        for metric in validation_metric_names
-    }
-    training_metric_names = fold_reports[0]["training_metrics"]
-    mean_training_metrics = {
-        metric: float(
-            np.mean([report["training_metrics"][metric] for report in fold_reports])
-        )
-        for metric in training_metric_names
-    }
-    std_training_metrics = {
-        metric: float(
-            np.std([report["training_metrics"][metric] for report in fold_reports])
-        )
-        for metric in training_metric_names
-    }
+    mean_validation_metrics, std_validation_metrics = _mean_and_std(
+        [report["validation_metrics"] for report in fold_reports]
+    )
+    mean_training_metrics, std_training_metrics = _mean_and_std(
+        [report["training_metrics"] for report in fold_reports]
+    )
     report: dict[str, object] = {
         "dataset": config.DATASET_NAME,
         "training_mode": config.TRAINING_MODE,

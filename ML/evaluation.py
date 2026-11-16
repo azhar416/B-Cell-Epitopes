@@ -69,6 +69,72 @@ def calculate_metrics(
     return metrics
 
 
+def mcc_at_thresholds(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    thresholds: np.ndarray,
+) -> np.ndarray:
+    """Matthews correlation at every threshold, in one vectorised pass.
+
+    Equivalent to calling ``calculate_metrics`` per threshold and reading
+    ``mcc``, but it sorts the scores once instead of rebuilding a confusion
+    matrix for each of the ~14k candidate thresholds. The four confusion counts
+    are read off suffix sums, and the denominator is multiplied as four square
+    roots so the product never approaches the 2**53 integer limit of float64.
+    """
+    labels = np.asarray(labels).reshape(-1).astype(np.int64)
+    probabilities = np.asarray(probabilities).reshape(-1).astype(float)
+    thresholds = np.asarray(thresholds).reshape(-1).astype(float)
+
+    order = np.argsort(probabilities, kind="mergesort")
+    sorted_scores = probabilities[order]
+    sorted_labels = labels[order]
+    # suffix_positives[i] == number of positives in sorted_labels[i:].
+    suffix_positives = np.concatenate(
+        [np.cumsum(sorted_labels[::-1])[::-1], [0]]
+    ).astype(float)
+    suffix_negatives = np.concatenate(
+        [np.cumsum((1 - sorted_labels)[::-1])[::-1], [0]]
+    ).astype(float)
+
+    # Rows predicted positive at threshold t are exactly sorted_scores[index:].
+    index = np.searchsorted(sorted_scores, thresholds, side="left")
+    true_positives = suffix_positives[index]
+    false_positives = suffix_negatives[index]
+    false_negatives = float(labels.sum()) - true_positives
+    true_negatives = float((labels == 0).sum()) - false_positives
+
+    numerator = (
+        true_positives * true_negatives - false_positives * false_negatives
+    )
+    denominator = (
+        np.sqrt(true_positives + false_positives)
+        * np.sqrt(true_positives + false_negatives)
+        * np.sqrt(true_negatives + false_positives)
+        * np.sqrt(true_negatives + false_negatives)
+    )
+    return np.where(denominator > 0, numerator / np.where(denominator > 0, denominator, 1.0), 0.0)
+
+
+def select_threshold_by_mcc(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+) -> tuple[float, float]:
+    """Pick the decision threshold maximising MCC on these scores.
+
+    Candidates are every observed probability plus the 0.0 and 1.0 endpoints.
+    Ties are broken towards 0.5, then towards the lower threshold, so the result
+    is deterministic and stays close to the default cut-off.
+    """
+    probabilities = np.asarray(probabilities).reshape(-1).astype(float)
+    thresholds = np.unique(np.r_[0.0, probabilities, 1.0])
+    scores = mcc_at_thresholds(labels, probabilities, thresholds)
+    best_score = float(scores.max())
+    tied = thresholds[np.isclose(scores, best_score)]
+    selected = min(tied, key=lambda value: (abs(value - 0.5), value))
+    return float(selected), best_score
+
+
 def save_evaluation_plots(
     labels: np.ndarray,
     probabilities: np.ndarray,
