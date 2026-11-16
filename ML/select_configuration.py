@@ -175,20 +175,32 @@ def tuning_protocol(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     metrics = sorted({m for record in records if (m := record.get("tuning_metric"))})
     seeds = sorted({s for record in records if (s := record.get("random_state"))})
-    environments = sorted({e for record in records if (e := record.get("environment"))})
-    # An unrecorded environment cannot be checked, so it is reported as its own
-    # state rather than quietly passing as uniform.
-    environment_known = len(environments) > 0
+    recorded = [e for record in records if (e := record.get("environment"))]
+    environments = sorted(set(recorded))
+    # Rows predating version recording carry no environment. Ignoring them would
+    # let a sweep that mixes recorded and unrecorded runs pass as uniform, which
+    # is exactly the case where the versions are most likely to differ: the two
+    # halves were produced at different times. So partial recording counts as a
+    # mismatch, not as agreement.
+    partially_recorded = 0 < len(recorded) < len(records)
     return {
         "tuning_metric": metrics[0] if len(metrics) == 1 else None,
         "tuning_metrics_seen": metrics,
         "random_state": seeds[0] if len(seeds) == 1 else None,
         "random_states_seen": seeds,
-        "environment": environments[0] if len(environments) == 1 else None,
+        "environment": (
+            environments[0]
+            if len(environments) == 1 and not partially_recorded
+            else None
+        ),
         "environments_seen": environments,
-        "environment_recorded": environment_known,
+        "environment_recorded": len(recorded) == len(records) and bool(recorded),
+        "environment_partially_recorded": partially_recorded,
         "is_uniform": (
-            len(metrics) == 1 and len(seeds) == 1 and len(environments) <= 1
+            len(metrics) == 1
+            and len(seeds) == 1
+            and len(environments) <= 1
+            and not partially_recorded
         ),
     }
 
@@ -397,6 +409,13 @@ def main() -> None:
             )
             for environment in protocol["environments_seen"]:
                 print(f"    {environment}")
+        if protocol["environment_partially_recorded"]:
+            print(
+                "  SEBAGIAN RUN TIDAK MENCATAT VERSI PUSTAKA. Run yang mencatat\n"
+                "  dan yang tidak berasal dari waktu berbeda, jadi justru di situ\n"
+                "  versinya paling mungkin berbeda. Tercatat:\n"
+                f"    {protocol['environments_seen'][0] if protocol['environments_seen'] else '-'}"
+            )
         print("  Jalankan ulang seluruh Fase 1 di satu lingkungan.")
     elif not protocol["environment_recorded"]:
         print(

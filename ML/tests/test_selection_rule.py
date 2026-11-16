@@ -317,6 +317,25 @@ class TuningProtocolProvenanceTests(unittest.TestCase):
 
         self.assertFalse(protocol["environment_recorded"])
         self.assertEqual(protocol["environments_seen"], [])
+        self.assertFalse(protocol["environment_partially_recorded"])
+
+    def test_mixing_recorded_and_unrecorded_runs_is_not_uniform(self):
+        """The likeliest mismatch: half the sweep predates version recording."""
+        records = [
+            {"tuning_metric": "roc_auc", "random_state": "42"},
+            {
+                "tuning_metric": "roc_auc",
+                "random_state": "42",
+                "environment": "python=3.11.11 sklearn=1.2.2",
+            },
+        ]
+
+        protocol = tuning_protocol(records)
+
+        self.assertFalse(protocol["is_uniform"])
+        self.assertTrue(protocol["environment_partially_recorded"])
+        self.assertFalse(protocol["environment_recorded"])
+        self.assertIsNone(protocol["environment"])
 
     def test_environment_columns_are_read_from_the_summary(self):
         rows = [
