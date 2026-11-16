@@ -1,6 +1,7 @@
 venv/
 __pycache__/
 kaggle.ipynb
+kaggle_old.ipynb
 /ML/artifacts/
 /DL/artifacts/
 /EmbeddingML/artifacts/
