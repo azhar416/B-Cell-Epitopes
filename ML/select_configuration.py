@@ -136,8 +136,31 @@ def read_proposed_runs(paths: Iterable[Path], metric: str) -> list[dict[str, Any
                     "n_features": feature_count(groups),
                     "mean": mean,
                     "std": std,
+                    "tuning_metric": (row.get("tuning_metric") or "").strip()
+                    or None,
+                    "random_state": (row.get("random_state") or "").strip()
+                    or None,
+                    "selected_hyperparameters": row.get("selected_hyperparameters"),
                 }
     return list(records.values())
+
+
+def tuning_protocol(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe the hyperparameter protocol phase 1 actually ran under.
+
+    Phase 2 must tune with the same metric and seed, or its model is not the
+    one phase 1 selected. The values are read back from the summary rows rather
+    than assumed, and a mixed sweep is reported instead of silently averaged.
+    """
+    metrics = sorted({m for record in records if (m := record.get("tuning_metric"))})
+    seeds = sorted({s for record in records if (s := record.get("random_state"))})
+    return {
+        "tuning_metric": metrics[0] if len(metrics) == 1 else None,
+        "tuning_metrics_seen": metrics,
+        "random_state": seeds[0] if len(seeds) == 1 else None,
+        "random_states_seen": seeds,
+        "is_uniform": len(metrics) == 1 and len(seeds) == 1,
+    }
 
 
 def _apply_one_se(
@@ -329,12 +352,33 @@ def main() -> None:
             )
 
     chosen_groups = list(consensus["chosen"]["feature_groups"])
+    protocol = tuning_protocol(records)
+    if not protocol["is_uniform"]:
+        print(
+            "\nPERINGATAN: baris Fase 1 tidak memakai satu protokol tuning.\n"
+            f"  metrik tuning terlihat : {protocol['tuning_metrics_seen']}\n"
+            f"  random_state terlihat  : {protocol['random_states_seen']}\n"
+            "  Fase 2 hanya sebanding kalau keduanya seragam."
+        )
+    # The hyperparameters phase 1 chose for the frozen combination. Phase 2
+    # re-derives these from the same data, so they double as a check that the
+    # two phases really ran one protocol.
+    chosen_key = consensus["chosen"]["feature_groups"]
+    phase1_hyperparameters = {
+        record["model_type"]: record.get("selected_hyperparameters")
+        for record in records
+        if record["feature_groups"] == chosen_key
+    }
     frozen = {
         "frozen_at": datetime.now(timezone.utc).isoformat(),
         "rule": "one_standard_error",
         "rule_reference": "Hastie & Tibshirani, Elements of Statistical Learning, 7.10",
         "n_folds": N_FOLDS,
         "binding_metric": args.metric,
+        "phase1_tuning_metric": protocol["tuning_metric"],
+        "phase1_random_state": protocol["random_state"],
+        "phase1_protocol_is_uniform": protocol["is_uniform"],
+        "phase1_selected_hyperparameters": phase1_hyperparameters,
         "scope": args.scope,
         "source_summaries": [str(path.resolve()) for path in args.summaries],
         "models": models,
@@ -378,10 +422,18 @@ def main() -> None:
           f"({frozen['selected_n_features']} fitur)")
     print("=" * 70)
     print("\nPerintah Fase 2:\n")
+    # --tuning-metric is passed explicitly: leaving it out would let phase 2
+    # fall back to the CFG default and tune against a different metric than
+    # phase 1 did, without anything in the output saying so.
+    metric_flag = (
+        f" \\\n    --tuning-metric {protocol['tuning_metric']}"
+        if protocol["tuning_metric"]
+        else ""
+    )
     print(
         "python -u -m ML.experiment_matrix --output-dir ML/artifacts/phase2 \\\n"
         "    --training-mode external_sars \\\n"
-        f"    --feature-groups {' '.join(chosen_groups)}"
+        f"    --feature-groups {' '.join(chosen_groups)}{metric_flag}"
     )
 
     if args.output:

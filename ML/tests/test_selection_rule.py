@@ -16,6 +16,7 @@ from ML.select_configuration import (
     read_proposed_runs,
     select_consensus,
     select_per_model,
+    tuning_protocol,
 )
 
 
@@ -238,6 +239,76 @@ class SummaryParsingTests(unittest.TestCase):
             records = read_proposed_runs([path], "roc_auc")
 
         self.assertEqual(records[0]["feature_groups"], ("aac", "biological"))
+
+
+class TuningProtocolProvenanceTests(unittest.TestCase):
+    """Phase 2 must inherit phase 1's tuning metric and seed, not a default."""
+
+    def _records(self, *pairs):
+        return [
+            {"tuning_metric": metric, "random_state": seed}
+            for metric, seed in pairs
+        ]
+
+    def test_uniform_sweep_reports_its_single_protocol(self):
+        protocol = tuning_protocol(
+            self._records(("roc_auc", "42"), ("roc_auc", "42"))
+        )
+
+        self.assertTrue(protocol["is_uniform"])
+        self.assertEqual(protocol["tuning_metric"], "roc_auc")
+        self.assertEqual(protocol["random_state"], "42")
+
+    def test_mixed_metrics_are_flagged_instead_of_picked(self):
+        protocol = tuning_protocol(
+            self._records(("roc_auc", "42"), ("pr_auc", "42"))
+        )
+
+        self.assertFalse(protocol["is_uniform"])
+        self.assertIsNone(protocol["tuning_metric"])
+        self.assertEqual(protocol["tuning_metrics_seen"], ["pr_auc", "roc_auc"])
+
+    def test_mixed_seeds_are_flagged(self):
+        protocol = tuning_protocol(
+            self._records(("roc_auc", "42"), ("roc_auc", "7"))
+        )
+
+        self.assertFalse(protocol["is_uniform"])
+        self.assertIsNone(protocol["random_state"])
+
+    def test_records_without_provenance_do_not_crash(self):
+        protocol = tuning_protocol([{"mean": 0.6, "std": 0.01}])
+
+        self.assertFalse(protocol["is_uniform"])
+        self.assertEqual(protocol["tuning_metrics_seen"], [])
+
+    def test_summary_rows_carry_the_protocol_through(self):
+        rows = [
+            {
+                "experiment_id": "a",
+                "status": "success",
+                "model_type": "svm",
+                "feature_set": "proposed",
+                "feature_groups": "aac",
+                "tuning_metric": "roc_auc",
+                "random_state": "42",
+                "selected_hyperparameters": '{"SVM_C": 10.0}',
+                "mean_validation_roc_auc": "0.61",
+                "std_validation_roc_auc": "0.03",
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            records = read_proposed_runs([path], "roc_auc")
+
+        self.assertEqual(records[0]["tuning_metric"], "roc_auc")
+        self.assertEqual(records[0]["random_state"], "42")
+        self.assertTrue(tuning_protocol(records)["is_uniform"])
 
 
 class FrozenCombinationRunTests(unittest.TestCase):
