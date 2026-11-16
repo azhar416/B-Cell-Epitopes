@@ -141,8 +141,29 @@ def read_proposed_runs(paths: Iterable[Path], metric: str) -> list[dict[str, Any
                     "random_state": (row.get("random_state") or "").strip()
                     or None,
                     "selected_hyperparameters": row.get("selected_hyperparameters"),
+                    "environment": _environment_of(row),
                 }
     return list(records.values())
+
+
+#: Columns written by ML.experiment_matrix.environment_record.
+ENVIRONMENT_COLUMNS = (
+    "python_version",
+    "numpy_version",
+    "pandas_version",
+    "sklearn_version",
+    "xgboost_version",
+)
+
+
+def _environment_of(row: dict[str, Any]) -> str | None:
+    """Collapse a row's recorded library versions into one comparable string."""
+    parts = [
+        f"{name.removesuffix('_version')}={value.strip()}"
+        for name in ENVIRONMENT_COLUMNS
+        if (value := row.get(name) or "")
+    ]
+    return " ".join(parts) or None
 
 
 def tuning_protocol(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -154,12 +175,21 @@ def tuning_protocol(records: list[dict[str, Any]]) -> dict[str, Any]:
     """
     metrics = sorted({m for record in records if (m := record.get("tuning_metric"))})
     seeds = sorted({s for record in records if (s := record.get("random_state"))})
+    environments = sorted({e for record in records if (e := record.get("environment"))})
+    # An unrecorded environment cannot be checked, so it is reported as its own
+    # state rather than quietly passing as uniform.
+    environment_known = len(environments) > 0
     return {
         "tuning_metric": metrics[0] if len(metrics) == 1 else None,
         "tuning_metrics_seen": metrics,
         "random_state": seeds[0] if len(seeds) == 1 else None,
         "random_states_seen": seeds,
-        "is_uniform": len(metrics) == 1 and len(seeds) == 1,
+        "environment": environments[0] if len(environments) == 1 else None,
+        "environments_seen": environments,
+        "environment_recorded": environment_known,
+        "is_uniform": (
+            len(metrics) == 1 and len(seeds) == 1 and len(environments) <= 1
+        ),
     }
 
 
@@ -355,10 +385,23 @@ def main() -> None:
     protocol = tuning_protocol(records)
     if not protocol["is_uniform"]:
         print(
-            "\nPERINGATAN: baris Fase 1 tidak memakai satu protokol tuning.\n"
+            "\nPERINGATAN: baris Fase 1 tidak dihasilkan di bawah satu protokol.\n"
             f"  metrik tuning terlihat : {protocol['tuning_metrics_seen']}\n"
-            f"  random_state terlihat  : {protocol['random_states_seen']}\n"
-            "  Fase 2 hanya sebanding kalau keduanya seragam."
+            f"  random_state terlihat  : {protocol['random_states_seen']}"
+        )
+        if len(protocol["environments_seen"]) > 1:
+            print(
+                "  LINGKUNGAN BERBEDA -- versi pustaka menentukan pembagian fold,\n"
+                "  jadi run di bawah versi berbeda TIDAK sebanding dan tidak boleh\n"
+                "  digabung dalam satu aturan 1-SE:"
+            )
+            for environment in protocol["environments_seen"]:
+                print(f"    {environment}")
+        print("  Jalankan ulang seluruh Fase 1 di satu lingkungan.")
+    elif not protocol["environment_recorded"]:
+        print(
+            "\nCatatan: summary ini dibuat sebelum versi pustaka dicatat, jadi "
+            "keseragaman lingkungan tidak bisa diperiksa."
         )
     # The hyperparameters phase 1 chose for the frozen combination. Phase 2
     # re-derives these from the same data, so they double as a check that the
@@ -377,6 +420,8 @@ def main() -> None:
         "binding_metric": args.metric,
         "phase1_tuning_metric": protocol["tuning_metric"],
         "phase1_random_state": protocol["random_state"],
+        "phase1_environment": protocol["environment"],
+        "phase1_environments_seen": protocol["environments_seen"],
         "phase1_protocol_is_uniform": protocol["is_uniform"],
         "phase1_selected_hyperparameters": phase1_hyperparameters,
         "scope": args.scope,

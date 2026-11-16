@@ -282,6 +282,74 @@ class TuningProtocolProvenanceTests(unittest.TestCase):
         self.assertFalse(protocol["is_uniform"])
         self.assertEqual(protocol["tuning_metrics_seen"], [])
 
+    def test_two_library_environments_are_not_uniform(self):
+        """Library versions decide the fold split, so mixing them is invalid."""
+        local = "python=3.14.8 sklearn=1.9.1 pandas=3.0.6"
+        kaggle = "python=3.11.11 sklearn=1.2.2 pandas=2.2.3"
+        records = [
+            {"tuning_metric": "roc_auc", "random_state": "42", "environment": local},
+            {"tuning_metric": "roc_auc", "random_state": "42", "environment": kaggle},
+        ]
+
+        protocol = tuning_protocol(records)
+
+        self.assertFalse(protocol["is_uniform"])
+        self.assertIsNone(protocol["environment"])
+        self.assertEqual(protocol["environments_seen"], sorted([kaggle, local]))
+
+    def test_one_environment_stays_uniform(self):
+        same = "python=3.14.8 sklearn=1.9.1"
+        records = [
+            {"tuning_metric": "roc_auc", "random_state": "42", "environment": same}
+        ] * 2
+
+        protocol = tuning_protocol(records)
+
+        self.assertTrue(protocol["is_uniform"])
+        self.assertEqual(protocol["environment"], same)
+        self.assertTrue(protocol["environment_recorded"])
+
+    def test_summary_without_version_columns_is_flagged_as_unrecorded(self):
+        """Older summaries predate version recording; that must not read as uniform."""
+        records = [{"tuning_metric": "roc_auc", "random_state": "42"}]
+
+        protocol = tuning_protocol(records)
+
+        self.assertFalse(protocol["environment_recorded"])
+        self.assertEqual(protocol["environments_seen"], [])
+
+    def test_environment_columns_are_read_from_the_summary(self):
+        rows = [
+            {
+                "experiment_id": "a",
+                "status": "success",
+                "model_type": "svm",
+                "feature_set": "proposed",
+                "feature_groups": "aac",
+                "tuning_metric": "roc_auc",
+                "random_state": "42",
+                "python_version": "3.11.11",
+                "numpy_version": "1.26.4",
+                "pandas_version": "2.2.3",
+                "sklearn_version": "1.2.2",
+                "xgboost_version": "2.0.3",
+                "mean_validation_roc_auc": "0.61",
+                "std_validation_roc_auc": "0.03",
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "experiment_summary.csv"
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            records = read_proposed_runs([path], "roc_auc")
+
+        self.assertEqual(
+            records[0]["environment"],
+            "python=3.11.11 numpy=1.26.4 pandas=2.2.3 sklearn=1.2.2 xgboost=2.0.3",
+        )
+
     def test_summary_rows_carry_the_protocol_through(self):
         rows = [
             {

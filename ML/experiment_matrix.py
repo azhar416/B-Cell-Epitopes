@@ -16,6 +16,30 @@ from ML.CFG import CFG, PROJECT_ROOT
 from ML.train import run_training
 
 
+#: Libraries whose version can change a result. scikit-learn decides the fold
+#: assignment and every estimator; numpy and pandas decide row order and
+#: floating-point reductions feeding into it. Runs made under different
+#: versions are not comparable, so the version is recorded per run and checked
+#: for uniformity before any cross-run conclusion is drawn.
+VERSIONED_LIBRARIES = ("numpy", "pandas", "scikit-learn", "xgboost")
+
+
+def environment_record() -> dict[str, str]:
+    """Interpreter and library versions this process is running under."""
+    import platform
+
+    record = {"python_version": platform.python_version()}
+    for name in VERSIONED_LIBRARIES:
+        module_name = "sklearn" if name == "scikit-learn" else name
+        try:
+            module = importlib.import_module(module_name)
+            version = getattr(module, "__version__", "unknown")
+        except Exception:
+            version = "absent"
+        record[f"{module_name}_version"] = str(version)
+    return record
+
+
 FEATURE_SETS = (
     "proposed",
     "perbandingan_1",
@@ -203,6 +227,9 @@ def _summary_row(
             else None
         ),
         "random_state": config.RANDOM_STATE,
+        # Recorded per run so a sweep split across machines cannot be merged
+        # without the mismatch being visible.
+        **environment_record(),
         "status": status,
         "output_dir": str(config.OUTPUT_DIR),
         "artifact_directory": None,
