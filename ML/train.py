@@ -799,9 +799,38 @@ def run_training(config: CFG) -> dict[str, object]:
     profile_output_dir = config.OUTPUT_DIR / config.FEATURE_SET
     summary_dir = profile_output_dir / "cross_validation"
 
+    # One hyperparameter set is chosen on pooled out-of-fold predictions over
+    # the whole development set, exactly as the external arm does, and then
+    # held fixed across all five folds. Both phases therefore select under the
+    # same protocol, and the reported mean +/- SD describes a single model
+    # instead of averaging five differently-tuned ones.
+    global_selection: dict[str, object] | None = None
+    global_comparison: list[dict[str, object]] = []
+    fold_base_config = config
+    if config.HYPERPARAMETER_TUNING:
+        selection_features = _build_configured_features(dataframe, config)
+        global_selection, global_comparison, _ = _select_external_model_from_bcell(
+            config,
+            selection_features,
+            dataframe["target"].to_numpy(dtype=int),
+            dataframe["parent_protein_id"].astype(str).to_numpy(),
+            dataset_name=config.DATASET_NAME,
+        )
+        fold_base_config = copy.copy(config)
+        for name, value in global_selection["parameters"].items():
+            setattr(fold_base_config, name, value)
+        fold_base_config.HYPERPARAMETER_TUNING = False
+        fold_base_config.validate()
+        print(
+            "Globally selected hyperparameters "
+            f"({global_selection['selection_metric']}="
+            f"{global_selection['selection_score']:.6f}): "
+            f"{global_selection['parameters']}"
+        )
+
     fold_reports = []
     for fold_number, fold_split in enumerate(folds, 1):
-        fold_config = copy.copy(config)
+        fold_config = copy.copy(fold_base_config)
         fold_config.OUTPUT_DIR = (
             profile_output_dir / "cross_validation" / f"fold_{fold_number}"
         )
@@ -814,7 +843,6 @@ def run_training(config: CFG) -> dict[str, object]:
         fold_reports.append(fold_report)
 
     prediction_frames = []
-    hyperparameter_comparison_rows = []
     for fold_number, fold_report in enumerate(fold_reports, 1):
         prediction_path = Path(fold_report["validation_predictions"])
         fold_predictions = pd.read_csv(prediction_path)
@@ -828,24 +856,24 @@ def run_training(config: CFG) -> dict[str, object]:
             probability_column
         ]
         prediction_frames.append(fold_predictions)
-        for candidate in fold_report.get("hyperparameter_comparison", []):
-            hyperparameter_comparison_rows.append(
-                {"fold": fold_number, **candidate}
-            )
+
+    # Candidates are now compared once, globally, so the comparison table has
+    # one row per candidate rather than one per (fold, candidate) pair.
+    hyperparameter_comparison_rows = list(global_comparison)
 
     out_of_fold_predictions = pd.concat(prediction_frames, ignore_index=True)
     summary_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = summary_dir / "out_of_fold_predictions.csv"
     out_of_fold_predictions.to_csv(predictions_path, index=False)
     hyperparameter_comparison_path = None
-    if config.HYPERPARAMETER_TUNING:
+    if config.HYPERPARAMETER_TUNING and hyperparameter_comparison_rows:
         hyperparameter_comparison_path = (
             summary_dir / "hyperparameter_comparison.csv"
         )
         comparison_frame = pd.DataFrame(hyperparameter_comparison_rows)
-        comparison_frame["hyperparameters"] = comparison_frame[
-            "hyperparameters"
-        ].map(json.dumps)
+        comparison_frame["parameters"] = comparison_frame["parameters"].map(
+            json.dumps
+        )
         comparison_frame.to_csv(hyperparameter_comparison_path, index=False)
     pooled_metrics = calculate_metrics(
         out_of_fold_predictions["target"].to_numpy(dtype=int),
@@ -921,10 +949,20 @@ def run_training(config: CFG) -> dict[str, object]:
             if hyperparameter_comparison_path is not None
             else None
         ),
+        "hyperparameter_selection_protocol": (
+            "One hyperparameter set selected on pooled out-of-fold predictions "
+            "over the whole development set, then held fixed across all five "
+            "folds. This matches the external arm's protocol."
+            if config.HYPERPARAMETER_TUNING
+            else "No tuning; configured hyperparameters used as-is."
+        ),
+        "selected_hyperparameters": (
+            global_selection["parameters"] if global_selection else None
+        ),
         "hyperparameter_tuning_warning": (
-            "Each outer validation fold is used to select hyperparameters and "
-            "to calculate that fold's validation metrics. These internal CV "
-            "metrics are tuning results, not an independent performance "
+            "Hyperparameters were selected on the same out-of-fold predictions "
+            "these metrics are computed from, so internal CV numbers remain "
+            "model-selection results rather than an independent performance "
             "estimate. Use a separate untouched dataset for final evaluation."
             if config.HYPERPARAMETER_TUNING
             else None
@@ -933,16 +971,16 @@ def run_training(config: CFG) -> dict[str, object]:
         "artifact_directory": str(summary_dir),
         "fold_reports": fold_reports,
         "validation_metrics_interpretation": (
-            "Pooled predictions from five folds. Each validation fold is also "
-            "used to select hyperparameters, so these metrics are tuning "
-            "results, not an independent performance estimate. B-cell folds "
-            "hold out complete proteins; SARS folds stratify peptides and "
-            "share the single source protein across folds."
+            "Pooled predictions from five folds, all using one globally "
+            "selected hyperparameter set. Selection used these same "
+            "out-of-fold predictions, so the metrics are model-selection "
+            "results, not an independent performance estimate. SARS folds "
+            "stratify peptides and share the single source protein."
             if config.DATASET_NAME.lower() == "sars"
-            else "Pooled predictions from five stratified protein-group folds. "
-            "Each validation fold is also used to select hyperparameters, so "
-            "these metrics are tuning results, not an independent performance "
-            "estimate."
+            else "Pooled predictions from five stratified protein-group folds, "
+            "all using one globally selected hyperparameter set. Selection "
+            "used these same out-of-fold predictions, so the metrics are "
+            "model-selection results, not an independent performance estimate."
         ),
     }
     with (summary_dir / "cross_validation_metrics.json").open(

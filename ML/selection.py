@@ -228,13 +228,20 @@ def _select_external_model_from_bcell(
     features: pd.DataFrame,
     labels: np.ndarray,
     groups: np.ndarray,
+    dataset_name: str = "bcell",
 ) -> tuple[dict[str, object], list[dict[str, object]], np.ndarray]:
-    """Select parameters and return their pooled B-cell OOF probabilities."""
+    """Select ONE parameter set on pooled out-of-fold predictions.
+
+    Every candidate is scored on all development rows rather than on a single
+    validation fold, so the choice is both more stable and less contaminated
+    than per-fold tuning. Used by the external arm and, so that both phases
+    share one protocol, by the internal cross-validation runner as well.
+    """
     base_parameters = _configured_model_parameters(config)
     folds, _ = make_cross_validation_splits(
         labels,
         groups,
-        dataset_name="bcell",
+        dataset_name=dataset_name,
         n_splits=5,
         random_state=config.RANDOM_STATE,
     )

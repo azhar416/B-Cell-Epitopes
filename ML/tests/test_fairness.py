@@ -325,6 +325,77 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual(mocked.call_count, len(specs))
 
 
+class UnifiedTuningProtocolTests(unittest.TestCase):
+    """Phase 1 must select hyperparameters the same way phase 2 does."""
+
+    def _run(self):
+        import pathlib
+        import tempfile
+
+        from ML.train import run_training
+
+        config = CFG()
+        config.TRAINING_MODE = "same_dataset"
+        config.MODEL_TYPE = "logistic_regression"
+        config.USE_AAC_FEATURES = False
+        config.USE_DPC_FEATURES = False
+        config.USE_PROTEIN_FEATURES = False
+        config.USE_BIOLOGICAL_FEATURES = True
+        with tempfile.TemporaryDirectory() as directory:
+            config.OUTPUT_DIR = pathlib.Path(directory)
+            with redirect_stdout(io.StringIO()):
+                return run_training(config)
+
+    def test_every_fold_uses_the_same_hyperparameters(self):
+        report = self._run()
+
+        chosen = [
+            json.dumps(fold["selected_hyperparameters"], sort_keys=True)
+            for fold in report["fold_metrics"]
+        ]
+
+        self.assertEqual(len(chosen), 5)
+        self.assertEqual(
+            len(set(chosen)),
+            1,
+            "folds disagree on hyperparameters; selection is not global",
+        )
+
+    def test_report_names_the_globally_selected_set(self):
+        report = self._run()
+
+        selected = report["selected_hyperparameters"]
+
+        self.assertIsNotNone(selected)
+        self.assertIn("LOGISTIC_REGRESSION_C", selected)
+        self.assertEqual(
+            json.dumps(selected, sort_keys=True),
+            json.dumps(
+                report["fold_metrics"][0]["selected_hyperparameters"],
+                sort_keys=True,
+            ),
+        )
+
+    def test_candidates_are_compared_once_not_once_per_fold(self):
+        report = self._run()
+
+        # Eight candidates compared globally, rather than 8 x 5 = 40 rows.
+        self.assertEqual(len(report["hyperparameter_comparison"]), 8)
+        self.assertTrue(
+            all("parameters" in row for row in report["hyperparameter_comparison"])
+        )
+
+    def test_internal_metrics_are_still_labelled_as_selection_results(self):
+        report = self._run()
+
+        self.assertIn("pooled out-of-fold", report["hyperparameter_selection_protocol"])
+        self.assertIn(
+            "not an independent performance estimate",
+            report["validation_metrics_interpretation"],
+        )
+        self.assertIsNotNone(report["hyperparameter_tuning_warning"])
+
+
 class TuningMetricTests(unittest.TestCase):
     def test_matrix_no_longer_overrides_the_configured_metric(self):
         base = CFG()
