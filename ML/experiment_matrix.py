@@ -55,19 +55,37 @@ class ExperimentSpec:
 
 def build_experiment_matrix(
     model_types: tuple[str, ...] | None = None,
+    feature_groups: tuple[str, ...] | None = None,
 ) -> list[ExperimentSpec]:
-    """Build all proposed ablations and fixed-profile comparison runs."""
+    """Build all proposed ablations and fixed-profile comparison runs.
+
+    Passing feature_groups restricts the proposed arm to that single frozen
+    combination, which is what phase 2 runs once a configuration is selected.
+    """
     selected_models = tuple(model_types) if model_types else MODEL_TYPES
     unknown_models = [model for model in selected_models if model not in MODEL_TYPES]
     if unknown_models:
         raise ValueError(f"Unsupported model types: {sorted(unknown_models)}.")
 
     specs: list[ExperimentSpec] = []
-    proposed_combinations = [
-        combination
-        for size in range(1, len(FEATURE_GROUPS) + 1)
-        for combination in itertools.combinations(FEATURE_GROUPS, size)
-    ]
+    if feature_groups is None:
+        proposed_combinations = [
+            combination
+            for size in range(1, len(FEATURE_GROUPS) + 1)
+            for combination in itertools.combinations(FEATURE_GROUPS, size)
+        ]
+    else:
+        unknown_groups = [
+            group for group in feature_groups if group not in FEATURE_GROUPS
+        ]
+        if unknown_groups:
+            raise ValueError(f"Unsupported feature groups: {sorted(unknown_groups)}.")
+        if not feature_groups:
+            raise ValueError("At least one feature group must be selected.")
+        # Canonical order keeps the experiment_id identical to the phase-1 run.
+        proposed_combinations = [
+            tuple(group for group in FEATURE_GROUPS if group in set(feature_groups))
+        ]
 
     for model_type in selected_models:
         specs.extend(
@@ -239,6 +257,7 @@ def run_experiment_matrix(
     base_config: CFG | None = None,
     training_mode: str | None = None,
     model_types: tuple[str, ...] | None = None,
+    feature_groups: tuple[str, ...] | None = None,
     tuning_metric: str | None = None,
     resume: bool = False,
 ) -> list[dict[str, Any]]:
@@ -260,7 +279,7 @@ def run_experiment_matrix(
         if output_root is not None
         else PROJECT_ROOT / "ML" / "artifacts" / "experiment_matrix"
     )
-    specs = build_experiment_matrix(model_types)
+    specs = build_experiment_matrix(model_types, feature_groups)
     _preflight(base_config, specs)
     if base_config.TRAINING_MODE == "same_dataset":
         print(
@@ -356,6 +375,17 @@ def main() -> None:
         help="Restrict the sweep to these models (default: all five).",
     )
     parser.add_argument(
+        "--feature-groups",
+        nargs="+",
+        choices=FEATURE_GROUPS,
+        default=None,
+        help=(
+            "Run the proposed arm with only this frozen feature combination "
+            "instead of all 15 ablations. Use it for phase 2, with the "
+            "combination that ML.select_configuration froze."
+        ),
+    )
+    parser.add_argument(
         "--tuning-metric",
         choices=("roc_auc", "pr_auc", "f1", "mcc"),
         default=None,
@@ -376,6 +406,7 @@ def main() -> None:
         args.output_dir,
         training_mode=args.training_mode,
         model_types=tuple(args.models) if args.models else None,
+        feature_groups=tuple(args.feature_groups) if args.feature_groups else None,
         tuning_metric=args.tuning_metric,
         resume=args.resume,
     )

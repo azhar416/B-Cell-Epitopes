@@ -123,6 +123,10 @@ def build_model(
                     method="sigmoid",
                     cv=3,
                     ensemble=False,
+                    # The three calibration folds are independent fits; running
+                    # them in parallel is bit-for-bit identical and measurably
+                    # faster, which matters because SVM dominates the sweep.
+                    n_jobs=3,
                 ),
             )
         ]
