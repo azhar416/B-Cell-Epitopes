@@ -168,6 +168,83 @@ def _external_cell(
     return "" if value is None else f"{value:.{digits}f}"
 
 
+def _index_summaries(
+    summaries: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]]:
+    """Index successful runs by (model, feature set, feature combination)."""
+    by_key: dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]] = {}
+    for row in summaries.values():
+        if (row.get("status") or "").strip() != "success":
+            continue
+        key = (
+            (row.get("model_type") or "").strip(),
+            (row.get("feature_set") or "").strip(),
+            _combination_key(row.get("feature_groups", "")),
+        )
+        by_key[key] = row
+    return by_key
+
+
+def _model_entries(
+    by_key: dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]],
+    model_type: str,
+    paper_order: tuple[str, ...],
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """The rows one model contributes: 15 ablations, then the paper feature sets."""
+    entries: list[tuple[str, dict[str, Any] | None]] = []
+    for combination in FEATURE_COMBINATION_ORDER:
+        label = " + ".join(GROUP_LABELS[group] for group in combination)
+        entries.append(
+            (label, by_key.get((model_type, "proposed", tuple(sorted(combination)))))
+        )
+    for feature_set in paper_order:
+        entries.append(
+            (PAPER_LABELS[feature_set], by_key.get((model_type, feature_set, None)))
+        )
+    return entries
+
+
+def _paper_sets_present(summaries: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """Paper feature sets this sweep actually covers, failed runs included.
+
+    Keeps feature sets that were never swept (because their embedding assets
+    are absent) out of the table instead of emitting permanently blank rows.
+    """
+    seen = {(row.get("feature_set") or "").strip() for row in summaries.values()}
+    return tuple(name for name in PAPER_ORDER if name in seen)
+
+
+def build_internal_table(
+    summaries: dict[str, dict[str, Any]],
+    *,
+    model_order: tuple[str, ...] = DEFAULT_MODEL_ORDER,
+    digits: int = 4,
+) -> list[list[str]]:
+    """Flat internal-validation table: Model, Note, then one metric per column.
+
+    Every row repeats the model label so the block can be sorted or filtered in
+    a spreadsheet without losing which model a row belongs to.
+    """
+    by_key = _index_summaries(summaries)
+    paper_order = _paper_sets_present(summaries)
+    rows: list[list[str]] = []
+    for model_type in model_order:
+        for note, row in _model_entries(by_key, model_type, paper_order):
+            cells = [MODEL_LABELS.get(model_type, model_type), note]
+            if row is None:
+                cells.extend([""] * len(METRICS))
+            else:
+                cells.extend(
+                    _internal_cell(row, metric, digits) for metric, _ in METRICS
+                )
+            rows.append(cells)
+    return rows
+
+
+def internal_header() -> list[str]:
+    return ["Model", "Note"] + [name for _, name in METRICS]
+
+
 def build_table(
     summaries: dict[str, dict[str, Any]],
     *,
@@ -179,29 +256,11 @@ def build_table(
     if threshold not in EXTERNAL_PREFIXES:
         raise ValueError(f"threshold must be one of {sorted(EXTERNAL_PREFIXES)}.")
 
-    by_key: dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]] = {}
-    for row in summaries.values():
-        if (row.get("status") or "").strip() != "success":
-            continue
-        key = (
-            (row.get("model_type") or "").strip(),
-            (row.get("feature_set") or "").strip(),
-            _combination_key(row.get("feature_groups", "")),
-        )
-        by_key[key] = row
+    by_key = _index_summaries(summaries)
 
     rows: list[list[str]] = []
     for number, model_type in enumerate(model_order, start=1):
-        entries: list[tuple[str, dict[str, Any] | None]] = []
-        for combination in FEATURE_COMBINATION_ORDER:
-            label = " + ".join(GROUP_LABELS[group] for group in combination)
-            entries.append(
-                (label, by_key.get((model_type, "proposed", tuple(sorted(combination)))))
-            )
-        for feature_set in PAPER_ORDER:
-            entries.append(
-                (PAPER_LABELS[feature_set], by_key.get((model_type, feature_set, None)))
-            )
+        entries = _model_entries(by_key, model_type, PAPER_ORDER)
 
         for index, (note, row) in enumerate(entries):
             cells = [
@@ -239,10 +298,12 @@ def render_tsv(rows: list[list[str]]) -> str:
     return "\n".join("\t".join(cells) for cells in (top, bottom, *rows))
 
 
-def render_pretty(rows: list[list[str]]) -> str:
-    _, bottom = header_rows()
-    labels = list(bottom)
-    labels[10] = "Ext?"
+def render_rows_tsv(header: list[str], rows: list[list[str]]) -> str:
+    return "\n".join("\t".join(cells) for cells in (header, *rows))
+
+
+def _render_grid(labels: list[str], rows: list[list[str]]) -> str:
+    """Align a header plus body into fixed-width console columns."""
     table = [labels, *rows]
     widths = [
         max(len(row[column]) for row in table if column < len(row))
@@ -258,6 +319,17 @@ def render_pretty(rows: list[list[str]]) -> str:
         if index == 0:
             lines.append("-+-".join("-" * width for width in widths))
     return "\n".join(lines)
+
+
+def render_pretty(rows: list[list[str]]) -> str:
+    _, bottom = header_rows()
+    labels = list(bottom)
+    labels[10] = "Ext?"
+    return _render_grid(labels, rows)
+
+
+def render_internal_pretty(rows: list[list[str]]) -> str:
+    return _render_grid(internal_header(), rows)
 
 
 def main() -> None:
@@ -284,6 +356,16 @@ def main() -> None:
     )
     parser.add_argument("--digits", type=int, default=4, help="Decimal places.")
     parser.add_argument(
+        "--layout",
+        choices=("internal", "comparison"),
+        default="internal",
+        help=(
+            "'internal' (default): Model, Note and the seven internal metrics "
+            "as mean ± SD, one row per run. 'comparison': the wider internal "
+            "plus external SARS block."
+        ),
+    )
+    parser.add_argument(
         "--external-threshold",
         choices=tuple(EXTERNAL_PREFIXES),
         default="selected",
@@ -308,24 +390,36 @@ def main() -> None:
         pass
 
     summaries = read_summaries(args.summaries)
-    rows = build_table(
-        summaries,
-        model_order=tuple(args.models) if args.models else DEFAULT_MODEL_ORDER,
-        digits=args.digits,
-        threshold=args.external_threshold,
-    )
-    print(render_pretty(rows))
+    model_order = tuple(args.models) if args.models else DEFAULT_MODEL_ORDER
 
-    total = sum(1 for row in rows if row[10] in {"TRUE", "FALSE"})
-    external_done = sum(1 for row in rows if row[10] == "TRUE")
-    internal_done = sum(1 for row in rows if row[3])
-    print(
-        f"\n{internal_done}/{total} rows have internal metrics; "
-        f"{external_done}/{total} have external SARS metrics."
-    )
+    if args.layout == "internal":
+        rows = build_internal_table(
+            summaries, model_order=model_order, digits=args.digits
+        )
+        print(render_internal_pretty(rows))
+        filled = sum(1 for row in rows if row[2])
+        print(f"\n{filled}/{len(rows)} rows have internal metrics.")
+        tsv = render_rows_tsv(internal_header(), rows)
+    else:
+        rows = build_table(
+            summaries,
+            model_order=model_order,
+            digits=args.digits,
+            threshold=args.external_threshold,
+        )
+        print(render_pretty(rows))
+        total = sum(1 for row in rows if row[10] in {"TRUE", "FALSE"})
+        external_done = sum(1 for row in rows if row[10] == "TRUE")
+        internal_done = sum(1 for row in rows if row[3])
+        print(
+            f"\n{internal_done}/{total} rows have internal metrics; "
+            f"{external_done}/{total} have external SARS metrics."
+        )
+        tsv = render_tsv(rows)
+
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(render_tsv(rows), encoding="utf-8")
+        args.output.write_text(tsv, encoding="utf-8")
         print(f"TSV written to: {args.output.resolve()}")
 
 
