@@ -23,6 +23,57 @@ from ML.train import run_training
 #: for uniformity before any cross-run conclusion is drawn.
 VERSIONED_LIBRARIES = ("numpy", "pandas", "scikit-learn", "xgboost")
 
+#: The environment phase 1 was run in, and therefore the one phase 2 must also
+#: use. Taken from the Kaggle image both phase-1 sessions ran on at commit
+#: fc2d784. It is declared here, not inferred, because Kaggle refreshes its
+#: image periodically: without a fixed reference a later session could hand out
+#: different folds and silently invalidate the frozen configuration.
+#:
+#: Measured effect of running elsewhere: on a local machine with
+#: scikit-learn 1.9.1 / pandas 3.0.6 / numpy 2.5.4, the same commit, data and
+#: seed gave random-forest ROC-AUC differing by up to 0.039 and PR-AUC SD by
+#: 2.4x, because the StratifiedGroupKFold split came out different.
+CANONICAL_ENVIRONMENT = {
+    "python_version": "3.13.18",
+    "numpy_version": "2.1.3",
+    "pandas_version": "2.3.3",
+    "sklearn_version": "1.6.1",
+    "xgboost_version": "3.4.1",
+}
+
+
+def environment_differences(
+    record: dict[str, str] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Map each library whose version differs from canonical to (canonical, actual)."""
+    record = environment_record() if record is None else record
+    return {
+        name: (expected, record.get(name, "absent"))
+        for name, expected in CANONICAL_ENVIRONMENT.items()
+        if record.get(name) != expected
+    }
+
+
+def report_environment(record: dict[str, str] | None = None) -> bool:
+    """Print the environment against canonical. True when it matches."""
+    record = environment_record() if record is None else record
+    differences = environment_differences(record)
+    if not differences:
+        print("Environment matches the canonical phase-1 environment:")
+        for name, version in record.items():
+            print(f"  {name:<18} {version}")
+        return True
+    print(
+        "WARNING: this environment is NOT the one phase 1 ran in. scikit-learn "
+        "decides the fold split and pandas the row order feeding it, so results "
+        "produced here are not comparable with phase 1 and must not be merged "
+        "with it."
+    )
+    print(f"  {'library':<18} {'phase 1':<12} {'here':<12}")
+    for name, (expected, actual) in differences.items():
+        print(f"  {name:<18} {expected:<12} {actual:<12}")
+    return False
+
 
 def environment_record() -> dict[str, str]:
     """Interpreter and library versions this process is running under."""
@@ -308,6 +359,10 @@ def run_experiment_matrix(
     )
     specs = build_experiment_matrix(model_types, feature_groups)
     _preflight(base_config, specs)
+    # Warn rather than refuse: a deliberate robustness run in another
+    # environment is legitimate. The hard gate sits where it matters, in
+    # ML.select_configuration, which will not merge runs across environments.
+    report_environment()
     if base_config.TRAINING_MODE == "same_dataset":
         print(
             "PHASE 1 (same_dataset): internal B-cell CV only. The SARS set is "

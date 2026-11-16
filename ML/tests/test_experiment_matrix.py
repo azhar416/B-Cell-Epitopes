@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from ML.CFG import CFG
 from ML.experiment_matrix import (
+    CANONICAL_ENVIRONMENT,
     FEATURE_GROUPS,
     FEATURE_SETS,
     MODEL_TYPES,
@@ -17,6 +18,9 @@ from ML.experiment_matrix import (
     _merge_with_existing_summary,
     _write_summary,
     build_experiment_matrix,
+    environment_differences,
+    environment_record,
+    report_environment,
     run_experiment_matrix,
 )
 
@@ -108,6 +112,73 @@ class ExperimentMatrixTests(unittest.TestCase):
             self.assertEqual(
                 {row["status"] for row in summary_rows}, {"success"}
             )
+
+
+class CanonicalEnvironmentTests(unittest.TestCase):
+    """Phase 2 must run where phase 1 ran, or the frozen configuration is void."""
+
+    def test_record_covers_every_canonical_key(self):
+        record = environment_record()
+
+        self.assertEqual(set(record), set(CANONICAL_ENVIRONMENT))
+        self.assertTrue(all(record.values()))
+
+    def test_matching_environment_reports_no_differences(self):
+        self.assertEqual(environment_differences(dict(CANONICAL_ENVIRONMENT)), {})
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(report_environment(dict(CANONICAL_ENVIRONMENT)))
+
+    def test_one_changed_library_is_the_only_difference_reported(self):
+        record = dict(CANONICAL_ENVIRONMENT)
+        record["sklearn_version"] = "1.7.0"
+
+        differences = environment_differences(record)
+
+        self.assertEqual(
+            differences, {"sklearn_version": (CANONICAL_ENVIRONMENT["sklearn_version"], "1.7.0")}
+        )
+
+    def test_absent_library_is_reported_rather_than_skipped(self):
+        record = dict(CANONICAL_ENVIRONMENT)
+        del record["xgboost_version"]
+
+        differences = environment_differences(record)
+
+        self.assertEqual(
+            differences["xgboost_version"],
+            (CANONICAL_ENVIRONMENT["xgboost_version"], "absent"),
+        )
+
+    def test_mismatch_warns_and_names_the_libraries(self):
+        record = dict(CANONICAL_ENVIRONMENT)
+        record["pandas_version"] = "3.0.6"
+        buffer = io.StringIO()
+
+        with redirect_stdout(buffer):
+            matched = report_environment(record)
+
+        output = buffer.getvalue()
+        self.assertFalse(matched)
+        self.assertIn("WARNING", output)
+        self.assertIn("pandas_version", output)
+        self.assertIn("3.0.6", output)
+        # The reason must be stated, not just the fact.
+        self.assertIn("fold", output)
+
+    def test_pinned_requirements_match_the_declared_environment(self):
+        """A pin that drifts from CANONICAL_ENVIRONMENT would install the wrong thing."""
+        text = (
+            Path(__file__).resolve().parents[1] / "requirements.txt"
+        ).read_text(encoding="utf-8")
+        pins = dict(
+            line.split("==", 1)
+            for line in text.splitlines()
+            if "==" in line and not line.strip().startswith("#")
+        )
+        for name in ("numpy", "pandas", "scikit-learn", "xgboost"):
+            key = ("sklearn" if name == "scikit-learn" else name) + "_version"
+            with self.subTest(library=name):
+                self.assertEqual(pins.get(name), CANONICAL_ENVIRONMENT[key])
 
 
 class SummaryMergeTests(unittest.TestCase):

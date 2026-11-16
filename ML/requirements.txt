@@ -1,7 +1,21 @@
-numpy>=1.24
-pandas>=2.0
-scikit-learn>=1.4,<2
+# Pinned to the environment phase 1 was run in: the Kaggle image used for both
+# phase-1 sessions at commit fc2d784, on Python 3.13.18.
+#
+# These are exact pins, not lower bounds, because scikit-learn decides the
+# StratifiedGroupKFold split and pandas decides the row order feeding into it.
+# Running the same commit, data and seed under scikit-learn 1.9.1 / pandas 3.0.6
+# gave random-forest ROC-AUC differing by up to 0.039 and PR-AUC SD by 2.4x,
+# purely because the folds came out different. Every one of the 90 phase-1 runs
+# and all of phase 2 must use one environment, or the comparison is not valid.
+#
+# ML.experiment_matrix.CANONICAL_ENVIRONMENT holds the same versions and is what
+# the sweep checks itself against at start-up.
+numpy==2.1.3
+pandas==2.3.3
+scikit-learn==1.6.1
+xgboost==3.4.1
+
+# Not part of the fold assignment, so bounded rather than pinned.
 imbalanced-learn>=0.12,<1
 joblib>=1.3
 matplotlib>=3.7
-xgboost>=2.0,<4
