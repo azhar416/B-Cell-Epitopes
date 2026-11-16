@@ -52,19 +52,38 @@ class CFG:
     XGBOOST_LEARNING_RATE: float = 0.1
     XGBOOST_SUBSAMPLE: float = 1.0
     XGBOOST_COLSAMPLE_BYTREE: float = 1.0
-    XGBOOST_SCALE_POS_WEIGHT: float = 1.0
+    # "balanced" mirrors CLASS_WEIGHT="balanced" for the other classifiers by
+    # resolving to (negatives / positives) of the rows actually fitted. Without
+    # it XGBoost would be the only model facing the imbalance unweighted, which
+    # makes a cross-model comparison unfair.
+    XGBOOST_SCALE_POS_WEIGHT: float | str = "balanced"
     HYPERPARAMETER_TUNING: bool = True
-    HYPERPARAMETER_TUNING_METRIC: str = "pr_auc"
+    # Locked for the publication sweep so every run — CLI, notebook, and the
+    # experiment matrix — selects candidates on the same metric.
+    HYPERPARAMETER_TUNING_METRIC: str = "roc_auc"
+    # Fairness requirement: every model must get the SAME number of candidates,
+    # otherwise "model A beats model B" partly measures search budget. Each list
+    # below holds TUNING_CANDIDATES_PER_MODEL - 1 overrides; the configured
+    # defaults are always evaluated as candidate 0.
     HYPERPARAMETER_TUNING_CANDIDATES: dict[str, list[dict[str, object]]] = field(
         default_factory=lambda: {
             "logistic_regression": [
+                {"LOGISTIC_REGRESSION_C": 0.01},
                 {"LOGISTIC_REGRESSION_C": 0.1},
+                {"LOGISTIC_REGRESSION_C": 0.3},
+                {"LOGISTIC_REGRESSION_C": 3.0},
                 {"LOGISTIC_REGRESSION_C": 10.0},
+                {"LOGISTIC_REGRESSION_C": 30.0},
+                {"LOGISTIC_REGRESSION_C": 100.0},
             ],
             "svm": [
                 {"SVM_C": 0.1},
+                {"SVM_C": 0.3},
+                {"SVM_C": 3.0},
                 {"SVM_C": 10.0},
-                {"SVM_GAMMA": "auto"},
+                {"SVM_C": 0.1, "SVM_GAMMA": "auto"},
+                {"SVM_C": 1.0, "SVM_GAMMA": "auto"},
+                {"SVM_C": 10.0, "SVM_GAMMA": "auto"},
             ],
             "random_forest": [
                 {"TREE_MAX_DEPTH": 8, "TREE_MIN_SAMPLES_LEAF": 2},
@@ -73,6 +92,11 @@ class CFG:
                 {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 10},
                 {"RANDOM_FOREST_TREES": 500},
                 {"TREE_MAX_FEATURES": "log2"},
+                {
+                    "RANDOM_FOREST_TREES": 500,
+                    "TREE_MAX_DEPTH": 12,
+                    "TREE_MIN_SAMPLES_LEAF": 5,
+                },
             ],
             "extra_trees": [
                 {"TREE_MAX_DEPTH": 8, "TREE_MIN_SAMPLES_LEAF": 2},
@@ -81,15 +105,29 @@ class CFG:
                 {"TREE_MAX_DEPTH": None, "TREE_MIN_SAMPLES_LEAF": 10},
                 {"RANDOM_FOREST_TREES": 500},
                 {"TREE_MAX_FEATURES": "log2"},
+                {
+                    "RANDOM_FOREST_TREES": 500,
+                    "TREE_MAX_DEPTH": 12,
+                    "TREE_MIN_SAMPLES_LEAF": 5,
+                },
             ],
             "xgboost": [
                 {"XGBOOST_MAX_DEPTH": 3},
                 {"XGBOOST_MAX_DEPTH": 9},
                 {"XGBOOST_LEARNING_RATE": 0.03},
                 {"XGBOOST_LEARNING_RATE": 0.3},
+                {"XGBOOST_SUBSAMPLE": 0.8, "XGBOOST_COLSAMPLE_BYTREE": 0.8},
+                {"XGBOOST_MAX_DEPTH": 9, "XGBOOST_LEARNING_RATE": 0.03},
+                {
+                    "XGBOOST_ESTIMATORS": 500,
+                    "XGBOOST_MAX_DEPTH": 3,
+                    "XGBOOST_LEARNING_RATE": 0.03,
+                },
             ],
         }
     )
+    # Set to None to allow unequal budgets (not recommended for the paper).
+    TUNING_CANDIDATES_PER_MODEL: int | None = 8
 
     @property
     def EFFECTIVE_AAC_FEATURES(self) -> bool:
@@ -269,8 +307,19 @@ class CFG:
             raise ValueError("XGBOOST_SUBSAMPLE must be in (0, 1].")
         if not 0 < self.XGBOOST_COLSAMPLE_BYTREE <= 1:
             raise ValueError("XGBOOST_COLSAMPLE_BYTREE must be in (0, 1].")
-        if self.XGBOOST_SCALE_POS_WEIGHT <= 0:
-            raise ValueError("XGBOOST_SCALE_POS_WEIGHT must be positive.")
+        if isinstance(self.XGBOOST_SCALE_POS_WEIGHT, str):
+            if self.XGBOOST_SCALE_POS_WEIGHT != "balanced":
+                raise ValueError(
+                    "XGBOOST_SCALE_POS_WEIGHT must be 'balanced' or a positive number."
+                )
+        elif (
+            not isinstance(self.XGBOOST_SCALE_POS_WEIGHT, (int, float))
+            or isinstance(self.XGBOOST_SCALE_POS_WEIGHT, bool)
+            or self.XGBOOST_SCALE_POS_WEIGHT <= 0
+        ):
+            raise ValueError(
+                "XGBOOST_SCALE_POS_WEIGHT must be 'balanced' or a positive number."
+            )
         if not isinstance(self.SVM_GAMMA, (str, float, int)):
             raise ValueError("SVM_GAMMA must be 'scale', 'auto', or a positive number.")
         if isinstance(self.SVM_GAMMA, str) and self.SVM_GAMMA not in {"scale", "auto"}:
@@ -339,6 +388,34 @@ class CFG:
                         f"Unsupported {model_type} tuning parameters: "
                         f"{sorted(unknown_parameters)}."
                     )
+        if self.TUNING_CANDIDATES_PER_MODEL is not None:
+            if (
+                not isinstance(self.TUNING_CANDIDATES_PER_MODEL, int)
+                or isinstance(self.TUNING_CANDIDATES_PER_MODEL, bool)
+                or self.TUNING_CANDIDATES_PER_MODEL < 1
+            ):
+                raise ValueError(
+                    "TUNING_CANDIDATES_PER_MODEL must be a positive integer or None."
+                )
+            budgets = {
+                model_type: len(candidates) + 1
+                for model_type, candidates in (
+                    self.HYPERPARAMETER_TUNING_CANDIDATES.items()
+                )
+            }
+            unequal = {
+                model_type: budget
+                for model_type, budget in budgets.items()
+                if budget != self.TUNING_CANDIDATES_PER_MODEL
+            }
+            if unequal:
+                raise ValueError(
+                    "Unequal hyperparameter search budgets make a cross-model "
+                    "comparison unfair. Every model must evaluate "
+                    f"{self.TUNING_CANDIDATES_PER_MODEL} candidates (defaults "
+                    f"plus overrides); got {unequal}. Set "
+                    "TUNING_CANDIDATES_PER_MODEL=None to bypass this check."
+                )
         if self.HYPERPARAMETER_TUNING and not self.HYPERPARAMETER_TUNING_CANDIDATES.get(
             self.MODEL_TYPE.lower()
         ):

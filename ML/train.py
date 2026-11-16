@@ -133,7 +133,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         random_state=config.RANDOM_STATE,
         k_neighbors=config.SMOTE_K_NEIGHBORS,
     )
-    final_model = _build_configured_model(final_config)
+    final_model = _build_configured_model(final_config, fit_labels)
     final_model.fit(fit_features, fit_labels)
     sars_scores = final_model.predict_proba(sars_features)[:, 1]
     sars_labels = sars["target"].to_numpy(dtype=int)
@@ -529,7 +529,7 @@ def _run_training_single(
         )
     else:
         print("SMOTE disabled.")
-    selected_hyperparameters, hyperparameter_comparison = (
+    selected_hyperparameters, hyperparameter_comparison, selected_model = (
         _select_hyperparameters_on_validation(
             config=config,
             fit_features=fit_features,
@@ -544,8 +544,12 @@ def _run_training_single(
     fitted_config.HYPERPARAMETER_TUNING = False
     fitted_config.validate()
 
-    model = _build_configured_model(fitted_config)
-    model.fit(fit_features, fit_labels)
+    # Tuning already fitted the winner on exactly these rows and parameters.
+    if selected_model is not None:
+        model = selected_model
+    else:
+        model = _build_configured_model(fitted_config, fit_labels)
+        model.fit(fit_features, fit_labels)
     train_probabilities = model.predict_proba(train_features)[:, 1]
     validation_probabilities = model.predict_proba(
         feature_frame.iloc[validation_indices]

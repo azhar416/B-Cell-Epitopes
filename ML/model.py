@@ -73,6 +73,12 @@ def build_model(
             raise ImportError(
                 "The xgboost classifier requires the optional 'xgboost' package."
             ) from error
+        if isinstance(xgboost_scale_pos_weight, str):
+            raise ValueError(
+                "xgboost_scale_pos_weight must be numeric here; resolve "
+                "'balanced' against the fitted labels before calling "
+                "build_model (see ML.selection.resolve_scale_pos_weight)."
+            )
         classifiers["xgboost"] = XGBClassifier(
             n_estimators=xgboost_estimators,
             max_depth=xgboost_max_depth,

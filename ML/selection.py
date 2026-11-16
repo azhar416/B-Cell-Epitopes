@@ -12,7 +12,43 @@ from ML.model import build_model
 from ML.oversampling import smote_resample
 
 
-def _build_configured_model(config: CFG):
+def resolve_scale_pos_weight(
+    config: CFG,
+    fit_labels: np.ndarray | None,
+) -> float:
+    """Resolve XGBoost's 'balanced' scale_pos_weight against the fitted labels.
+
+    This is XGBoost's equivalent of class_weight="balanced": the positive class
+    is up-weighted by negatives/positives so that every model in the comparison
+    faces the imbalance with the same correction. It is computed per fit, so a
+    SMOTE-balanced training set correctly resolves to ~1.0.
+    """
+    configured = config.XGBOOST_SCALE_POS_WEIGHT
+    if not isinstance(configured, str):
+        return float(configured)
+    if config.CLASS_WEIGHT is None and not config.USE_SMOTE:
+        # The run deliberately opts out of imbalance correction entirely.
+        return 1.0
+    if fit_labels is None:
+        raise ValueError(
+            "XGBOOST_SCALE_POS_WEIGHT='balanced' needs the labels being fitted."
+        )
+    labels = np.asarray(fit_labels).reshape(-1).astype(int)
+    positives = int((labels == 1).sum())
+    negatives = int((labels == 0).sum())
+    if positives == 0 or negatives == 0:
+        raise ValueError(
+            "Cannot balance XGBoost: the fitted labels contain a single class."
+        )
+    return negatives / positives
+
+
+def _build_configured_model(config: CFG, fit_labels: np.ndarray | None = None):
+    scale_pos_weight = (
+        resolve_scale_pos_weight(config, fit_labels)
+        if config.MODEL_TYPE == "xgboost"
+        else 1.0
+    )
     return build_model(
         model_type=config.MODEL_TYPE,
         random_state=config.RANDOM_STATE,
@@ -31,7 +67,7 @@ def _build_configured_model(config: CFG):
         xgboost_learning_rate=config.XGBOOST_LEARNING_RATE,
         xgboost_subsample=config.XGBOOST_SUBSAMPLE,
         xgboost_colsample_bytree=config.XGBOOST_COLSAMPLE_BYTREE,
-        xgboost_scale_pos_weight=config.XGBOOST_SCALE_POS_WEIGHT,
+        xgboost_scale_pos_weight=scale_pos_weight,
         feature_set=config.FEATURE_SET,
     )
 
@@ -90,11 +126,16 @@ def _select_hyperparameters_on_validation(
     fit_labels: np.ndarray,
     validation_features: pd.DataFrame,
     validation_labels: np.ndarray,
-) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """Select hyperparameters by scoring candidates on the outer validation fold."""
+) -> tuple[dict[str, object], list[dict[str, object]], object | None]:
+    """Select hyperparameters by scoring candidates on the outer validation fold.
+
+    Also returns the winning candidate's already-fitted model. It was trained on
+    exactly the rows and parameters a refit would use, so the caller can reuse
+    it instead of paying for an identical fit.
+    """
     base_parameters = _configured_model_parameters(config)
     if not config.HYPERPARAMETER_TUNING:
-        return base_parameters, []
+        return base_parameters, [], None
 
     parameter_sets = [base_parameters]
     parameter_sets.extend(
@@ -104,6 +145,10 @@ def _select_hyperparameters_on_validation(
         ]
     )
     candidate_results = []
+    # Only the best model so far is retained; keeping all of them would hold
+    # eight fitted forests in memory at once.
+    best_model = None
+    best_score_so_far = -np.inf
     for candidate_index, parameters in enumerate(parameter_sets):
         candidate_config = copy.copy(config)
         for name, value in parameters.items():
@@ -111,7 +156,7 @@ def _select_hyperparameters_on_validation(
         candidate_config.HYPERPARAMETER_TUNING = False
         candidate_config.validate()
 
-        model = _build_configured_model(candidate_config)
+        model = _build_configured_model(candidate_config, fit_labels)
         model.fit(fit_features, fit_labels)
         validation_scores = model.predict_proba(validation_features)[:, 1]
         validation_metrics = calculate_metrics(
@@ -126,6 +171,10 @@ def _select_hyperparameters_on_validation(
                 f"{config.HYPERPARAMETER_TUNING_METRIC} for candidate "
                 f"{candidate_index}."
             )
+        # Strictly greater keeps the first candidate on ties, matching max().
+        if score > best_score_so_far:
+            best_score_so_far = score
+            best_model = model
         candidate_results.append(
             {
                 "candidate_index": candidate_index,
@@ -171,7 +220,7 @@ def _select_hyperparameters_on_validation(
             }
         )
 
-    return best_candidate["hyperparameters"], comparison
+    return best_candidate["hyperparameters"], comparison, best_model
 
 
 def _select_external_model_from_bcell(
@@ -216,7 +265,7 @@ def _select_external_model_from_bcell(
                 random_state=config.RANDOM_STATE,
                 k_neighbors=config.SMOTE_K_NEIGHBORS,
             )
-            model = _build_configured_model(candidate_config)
+            model = _build_configured_model(candidate_config, fit_labels)
             model.fit(fit_features, fit_labels)
             val_scores = model.predict_proba(
                 features.iloc[validation_indices]
