@@ -22,6 +22,7 @@ from ML.experiment_matrix import (
     FEATURE_GROUPS,
     GROUP_SWITCHES,
     PAPER_PATH_START,
+    PAPER_1_EQUIVALENT,
     PAPER_RECONSTRUCTIONS,
     PROTEIN_GROUPS,
     REPRODUCTION_CHECK_COMBINATIONS,
@@ -559,14 +560,20 @@ class ReconstructionTests(unittest.TestCase):
                     )
                 )
 
-    def test_fs1_rebuild_differs_only_by_its_duplicated_column(self):
-        published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
-        rebuilt = self._by_groups(PAPER_RECONSTRUCTIONS["perbandingan_1"])
+    def test_fs1_reduces_to_a_part_one_combination(self):
+        """Its paper drops protein_length and the four protein-level columns.
 
-        extra = set(published.columns) - set(rebuilt.columns)
-        self.assertEqual(extra, {"position"})
+        What remains is the propensity scales plus peptide length, which is a
+        power-set member, not a rung of the ladder. The only extra column is
+        "position", which the paper also lists and which duplicates peptide
+        length on this data.
+        """
+        published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
+        rebuilt = self._by_groups(PAPER_1_EQUIVALENT)
+
+        self.assertEqual(published.shape[1], 6)
+        self.assertEqual(set(published.columns) - set(rebuilt.columns), {"position"})
         self.assertFalse(set(rebuilt.columns) - set(published.columns))
-        # "position" is end - start + 1, which is the peptide length again.
         self.assertTrue(
             np.allclose(
                 published["position"].to_numpy(float),
@@ -582,6 +589,26 @@ class ReconstructionTests(unittest.TestCase):
                         equal_nan=True,
                     )
                 )
+
+    def test_fs1_keeps_no_protein_level_column(self):
+        """The paper removed them on purpose; our profile must not add them."""
+        published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
+        removed = {
+            "protein_length",
+            "isoelectric_point",
+            "aromaticity",
+            "hydrophobicity",
+            "stability",
+            "parent_protein_id",
+            "start_position",
+            "end_position",
+        }
+
+        self.assertFalse(set(published.columns) & removed)
+
+    def test_fs1_is_not_a_ladder_rung(self):
+        self.assertNotIn("perbandingan_1", PAPER_RECONSTRUCTIONS)
+        self.assertIn(PAPER_1_EQUIVALENT, ALL_COMBINATIONS)
 
     def test_fs3_is_not_reconstructible(self):
         """RFE kept subsets of PROP and PROTGLOBAL, so no union of groups fits."""

@@ -96,7 +96,7 @@ class InternalLayoutTests(unittest.TestCase):
                 "AAC + PROP + LEN",
                 "AAC + FLANK + LEN",
                 "AAC + PROP + FLANK + LEN",
-                "PROP + LEN",
+                "PROP + LEN (= FS-1 less its duplicate column)",
                 "PROP + FLANK + LEN",
                 "FLANK + LEN",
                 "AAC + DPC + LEN",

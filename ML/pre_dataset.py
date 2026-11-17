@@ -119,12 +119,19 @@ def build_feature_frame(
         )
 
     if feature_set == "perbandingan_1":
+        # Six columns, following the paper's own feature engineering. It drops
+        # the protein id, start_position and end_position, replacing the last
+        # two with "position" = (end - start) + 1. It also drops protein_length
+        # ("it was not used in this study") and isoelectric_point, aromaticity,
+        # hydrophobicity and stability, which the paper notes "are the same in
+        # all peptides as they are properties dependent on the protein
+        # sequence". Only the four peptide-level propensity scales remain, so
+        # protein_seq is not needed at all.
         required_columns = {
             sequence_column,
-            "protein_seq",
             "start_position",
             "end_position",
-            *DESCRIPTOR_COLUMNS,
+            *PROP_COLUMNS,
         }
         missing_columns = required_columns.difference(dataframe.columns)
         if missing_columns:
@@ -136,10 +143,6 @@ def build_feature_frame(
             normalize_sequence(value, row_label=index)
             for index, value in dataframe[sequence_column].items()
         ]
-        protein_sequences = [
-            normalize_sequence(value, row_label=index)
-            for index, value in dataframe["protein_seq"].items()
-        ]
         start_positions = pd.to_numeric(dataframe["start_position"], errors="raise")
         end_positions = pd.to_numeric(dataframe["end_position"], errors="raise")
         if start_positions.isna().any() or end_positions.isna().any():
@@ -150,12 +153,14 @@ def build_feature_frame(
         features = pd.DataFrame(
             {
                 "peptide_length": [len(sequence) for sequence in peptide_sequences],
-                "protein_length": [len(sequence) for sequence in protein_sequences],
+                # Duplicates peptide_length on this data, where the recorded
+                # coordinates always span the peptide exactly. Kept because the
+                # paper lists both.
                 "position": (end_positions - start_positions + 1).astype(float),
             },
             index=dataframe.index,
         )
-        for column in DESCRIPTOR_COLUMNS:
+        for column in PROP_COLUMNS:
             features[column] = pd.to_numeric(dataframe[column], errors="coerce")
         return features
 

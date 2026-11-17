@@ -294,7 +294,9 @@ def predict_peptides(
             input_frame[column] = descriptor_data[column].to_numpy()
 
     if feature_profile == "perbandingan_1":
-        required_columns = {"protein_seq", "start_position", "end_position"}
+        # protein_seq is no longer needed: the profile keeps no protein-level
+        # column, only peptide length, position and the propensity scales.
+        required_columns = {"start_position", "end_position"}
         if protein_context_data is None:
             raise ValueError(
                 "A perbandingan_1 model needs protein_context_data containing "

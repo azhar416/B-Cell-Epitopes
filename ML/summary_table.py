@@ -107,11 +107,12 @@ PART5_WITHOUT_LEN = (("aac", "prop", "flank"),)
 CONTRAST_COMBINATION_ORDER = (
     PART2_PAPER_PATH + PART3_ON_BACKBONE + PART4_ALONE + PART5_WITHOUT_LEN
 )
-# Rows whose first two rungs reproduce a published profile exactly, so the
-# table can say so instead of leaving the reader to spot it.
+# Rows that reproduce a published profile, so the table says so instead of
+# leaving the reader to spot it. FS-1 reduces to PROP + LEN once its own
+# feature engineering is applied, which is a part-1 row rather than a rung.
 PAPER_PATH_NOTES = {
     tuple(sorted(PART2_PAPER_PATH[0])): " (= FS-2)",
-    tuple(sorted(PART2_PAPER_PATH[1])): " (= FS-1 less its duplicate column)",
+    ("len", "prop"): " (= FS-1 less its duplicate column)",
 }
 # Group names earlier sweeps used. Kept only so a superseded summary still
 # prints; the matrix no longer produces any of them.
@@ -250,7 +251,8 @@ def full_row_plan() -> list[tuple[str, str, tuple[str, ...] | None]]:
     """
     plan: list[tuple[str, str, tuple[str, ...] | None]] = []
     for combination in FEATURE_COMBINATION_ORDER:
-        plan.append((_group_label(combination), "proposed", combination))
+        note = PAPER_PATH_NOTES.get(tuple(sorted(combination)), "")
+        plan.append((_group_label(combination) + note, "proposed", combination))
     for combination in SUPERSEDED_COMBINATION_ORDER:
         plan.append((_group_label(combination), "proposed", combination))
     for combination in CONTRAST_COMBINATION_ORDER:

@@ -206,20 +206,31 @@ def _contrast_combinations() -> list[tuple[str, ...]]:
 
 CONTRAST_COMBINATIONS = tuple(_contrast_combinations())
 
-# The first two rungs of part 2 reproduce published profiles column for
-# column, which makes those papers points on our own ladder rather than
-# external baselines, and checks the fixed-profile code path against the group
-# switches. FS-3 is absent on purpose: RFE kept subsets of PROP and
-# PROTGLOBAL rather than whole groups, so no union of groups reproduces it.
+# The first rung of part 2 reproduces FS-2 column for column, which makes that
+# paper a point on our own ladder rather than an external baseline and checks
+# the fixed-profile code path against the group switches.
+#
+# FS-1 is not here. Its paper drops protein_length and the four protein-level
+# descriptors, so what remains is the four propensity scales plus peptide
+# length -- that is PAPER_PATH_START itself, a part-1 combination, plus a
+# "position" column that duplicates peptide length on this data.
+#
+# FS-3 is not here either: RFE kept subsets of PROP and PROTGLOBAL rather than
+# whole groups, and added the label-encoded protein id, so no union of groups
+# reproduces it.
 PAPER_RECONSTRUCTIONS = {
     "perbandingan_2": canonical(PAPER_PATH_START + ("protglobal",)),
-    "perbandingan_1": canonical(PAPER_PATH_START + ("protglobal", "protlen")),
 }
+# What FS-1 reduces to once its own feature engineering is applied. It sits in
+# part 1, not on the ladder.
+PAPER_1_EQUIVALENT = canonical(PAPER_PATH_START)
 if any(
     combination not in CONTRAST_COMBINATIONS
     for combination in PAPER_RECONSTRUCTIONS.values()
 ):
     raise RuntimeError("Every paper reconstruction must be a rung of part 2.")
+if PAPER_1_EQUIVALENT not in ALL_COMBINATIONS:
+    raise RuntimeError("The FS-1 equivalent must be a part-1 combination.")
 
 
 @dataclass(frozen=True)
