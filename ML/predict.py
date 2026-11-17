@@ -8,6 +8,7 @@ from joblib import load
 
 from ML.pre_dataset import (
     DESCRIPTOR_COLUMNS,
+    FLANK_WINDOW_DEFAULT,
     PERBANDINGAN_3_DESCRIPTOR_COLUMNS,
     build_feature_frame,
     get_bert_cls_columns,
@@ -59,6 +60,19 @@ def predict_peptides(
             or any(name in DESCRIPTOR_COLUMNS for name in feature_names),
         )
     )
+    use_flank_features = bool(
+        bundle.get(
+            "use_flank_features",
+            any(name.startswith("flank_") for name in feature_names),
+        )
+    )
+    flank_window = int(bundle.get("flank_window", FLANK_WINDOW_DEFAULT))
+    flank_split_sides = bool(
+        bundle.get(
+            "flank_split_sides",
+            any(name.startswith("flank_left_aac_") for name in feature_names),
+        )
+    )
     if feature_profile in {
         "perbandingan_1",
         "perbandingan_2",
@@ -67,6 +81,7 @@ def predict_peptides(
         use_peptide_features = False
         use_protein_features = False
         use_biological_features = False
+        use_flank_features = False
     peptide_feature_type = bundle.get(
         "peptide_feature_type",
         legacy_feature_set
@@ -340,7 +355,7 @@ def predict_peptides(
             input_frame[column] = protein_context_data[column].to_numpy()
         for column in PERBANDINGAN_3_DESCRIPTOR_COLUMNS:
             input_frame[column] = descriptor_data[column].to_numpy()
-    elif use_protein_features:
+    elif use_protein_features or use_flank_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
             raise ValueError(
@@ -371,6 +386,9 @@ def predict_peptides(
         use_aac_features=use_aac_features,
         use_dpc_features=use_dpc_features,
         parent_protein_id_mapping=bundle.get("parent_protein_id_mapping"),
+        use_flank_features=use_flank_features,
+        flank_window=flank_window,
+        flank_split_sides=flank_split_sides,
     ).reindex(columns=feature_names)
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])

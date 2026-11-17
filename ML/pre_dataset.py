@@ -25,6 +25,10 @@ PERBANDINGAN_3_DESCRIPTOR_COLUMNS = (
 )
 BERT_CLS_PREFIX = "bert_cls_"
 PROTTRANS_PREFIX = "prott5_"
+# Residues taken from the parent protein on each side of the peptide. Fixed in
+# advance rather than tuned: a B-cell linear epitope is typically 8-12 residues,
+# and every value tested would widen the selection space the 1-SE rule guards.
+FLANK_WINDOW_DEFAULT = 3
 
 
 def get_bert_cls_columns(columns) -> tuple[str, ...]:
@@ -71,6 +75,9 @@ def build_feature_frame(
     use_aac_features: bool | None = None,
     use_dpc_features: bool | None = None,
     parent_protein_id_mapping: dict[str, int] | None = None,
+    use_flank_features: bool = False,
+    flank_window: int = FLANK_WINDOW_DEFAULT,
+    flank_split_sides: bool = True,
 ) -> pd.DataFrame:
     """Build one of the paper-based comparison profiles or proposed features."""
     if not isinstance(feature_set, str):
@@ -295,9 +302,15 @@ def build_feature_frame(
         ("use_peptide_features", use_peptide_features),
         ("use_protein_features", use_protein_features),
         ("use_biological_features", use_biological_features),
+        ("use_flank_features", use_flank_features),
+        ("flank_split_sides", flank_split_sides),
     ):
         if not isinstance(enabled, bool):
             raise ValueError(f"{name} must be a boolean.")
+    if not isinstance(flank_window, int) or isinstance(flank_window, bool):
+        raise ValueError("flank_window must be an integer.")
+    if flank_window < 1:
+        raise ValueError("flank_window must be positive.")
     if not isinstance(peptide_feature_type, str):
         raise ValueError("peptide_feature_type must be a string.")
     peptide_feature_type = peptide_feature_type.lower()
@@ -325,10 +338,17 @@ def build_feature_frame(
             use_dpc_features,
             use_protein_features,
             use_biological_features,
+            use_flank_features,
         )
     ):
         raise ValueError("At least one feature group must be enabled.")
-    if (use_aac_features or use_dpc_features or use_protein_features) and sequence_column not in dataframe:
+    needs_sequence = (
+        use_aac_features
+        or use_dpc_features
+        or use_protein_features
+        or use_flank_features
+    )
+    if needs_sequence and sequence_column not in dataframe:
         raise ValueError(f"DataFrame is missing sequence column {sequence_column!r}.")
 
     sequences = (
@@ -336,7 +356,7 @@ def build_feature_frame(
             normalize_sequence(value, row_label=index)
             for index, value in dataframe[sequence_column].items()
         ]
-        if use_aac_features or use_dpc_features or use_protein_features
+        if needs_sequence
         else []
     )
     features: dict[str, list[float]] = {}
@@ -352,12 +372,14 @@ def build_feature_frame(
         features.update({f"dpc_{dipeptide}": [] for dipeptide in dipeptides})
 
     protein_sequences = None
-    if use_protein_features:
+    start_positions = None
+    end_positions = None
+    if use_protein_features or use_flank_features:
         required_columns = {"protein_seq", "start_position", "end_position"}
         missing_columns = required_columns.difference(dataframe.columns)
         if missing_columns:
             raise ValueError(
-                "Protein features require columns: "
+                "Protein and flank features require columns: "
                 f"{sorted(missing_columns)}."
             )
         protein_sequences = [
@@ -383,11 +405,25 @@ def build_feature_frame(
                 "Protein positions must be 1-based and end_position must be "
                 "greater than or equal to start_position."
             )
+    if use_protein_features:
         for amino_acid in AMINO_ACIDS:
             features[f"protein_aac_{amino_acid}"] = []
         features["protein_aac_X"] = []
         features["start_position"] = []
         features["end_position"] = []
+
+    flank_sides = ("left", "right") if flank_split_sides else ("",)
+    if use_flank_features:
+        for side in flank_sides:
+            prefix = f"flank_{side}_aac_" if side else "flank_aac_"
+            for amino_acid in AMINO_ACIDS:
+                features[f"{prefix}{amino_acid}"] = []
+            features[f"{prefix}X"] = []
+        # How many residues each side actually supplied. Without these a
+        # truncated flank is indistinguishable from a balanced one, because
+        # both are rates and an absent flank is an all-zero vector.
+        features["flank_left_available"] = []
+        features["flank_right_available"] = []
 
     if use_aac_features or use_dpc_features:
         for sequence in sequences:
@@ -427,6 +463,38 @@ def build_feature_frame(
                 float(start_positions.iloc[index])
             )
             features["end_position"].append(float(end_positions.iloc[index]))
+
+    if use_flank_features:
+        for index, protein_sequence in enumerate(protein_sequences):
+            start = int(start_positions.iloc[index])
+            end = int(end_positions.iloc[index])
+            # The flank is only meaningful if the coordinates really point at
+            # the peptide. A silent mismatch would read neighbouring residues
+            # from the wrong place and never raise.
+            if protein_sequence[start - 1 : end] != sequences[index]:
+                raise ValueError(
+                    "Flank features need start_position/end_position to locate "
+                    f"the peptide in protein_seq; row {dataframe.index[index]!r} "
+                    f"has {sequences[index]!r} at positions {start}-{end} but "
+                    f"protein_seq holds {protein_sequence[start - 1 : end]!r}."
+                )
+            left = protein_sequence[max(0, start - 1 - flank_window) : start - 1]
+            right = protein_sequence[end : end + flank_window]
+            for side in flank_sides:
+                prefix = f"flank_{side}_aac_" if side else "flank_aac_"
+                flank = {"left": left, "right": right, "": left + right}[side]
+                residue_counts = Counter(flank)
+                # Rate over the residues that exist, never padded with a
+                # placeholder: padding would invent composition that is not
+                # in the protein.
+                denominator = max(len(flank), 1)
+                for amino_acid in AMINO_ACIDS:
+                    features[f"{prefix}{amino_acid}"].append(
+                        residue_counts[amino_acid] / denominator
+                    )
+                features[f"{prefix}X"].append(residue_counts["X"] / denominator)
+            features["flank_left_available"].append(float(len(left)))
+            features["flank_right_available"].append(float(len(right)))
 
     result = pd.DataFrame(features, index=dataframe.index)
     if use_biological_features:

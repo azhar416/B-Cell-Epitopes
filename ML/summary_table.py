@@ -56,26 +56,41 @@ GROUP_LABELS = {
     "dpc": "DPC",
     "biological": "BIO",
     "protein": "PROT",
+    "flank": "FLANK",
 }
 # Display order used in the manuscript table: AAC-first combinations, then DPC,
-# then BIO, then PROT alone.
+# then BIO, then the fourth group alone.
 FEATURE_COMBINATION_ORDER = (
     ("aac",),
     ("aac", "dpc"),
     ("aac", "biological"),
-    ("aac", "protein"),
+    ("aac", "flank"),
     ("aac", "dpc", "biological"),
+    ("aac", "dpc", "flank"),
+    ("aac", "biological", "flank"),
+    ("aac", "dpc", "biological", "flank"),
+    ("dpc",),
+    ("dpc", "biological"),
+    ("dpc", "flank"),
+    ("dpc", "biological", "flank"),
+    ("biological",),
+    ("biological", "flank"),
+    ("flank",),
+)
+# PROT held the slot FLANK now holds. Kept so the superseded phase-1 sweep
+# still renders, but out of the current grid: the matrix no longer produces
+# these runs, and blank rows for them would be noise.
+SUPERSEDED_COMBINATION_ORDER = (
+    ("aac", "protein"),
     ("aac", "dpc", "protein"),
     ("aac", "biological", "protein"),
     ("aac", "dpc", "biological", "protein"),
-    ("dpc",),
-    ("dpc", "biological"),
     ("dpc", "protein"),
     ("dpc", "biological", "protein"),
-    ("biological",),
     ("biological", "protein"),
     ("protein",),
 )
+ALL_COMBINATION_ORDER = FEATURE_COMBINATION_ORDER + SUPERSEDED_COMBINATION_ORDER
 # Only the FEATURE SET is taken from each comparison study; the classifier,
 # folds, tuning budget and imbalance handling are ours. Labelling these rows
 # with the original method names would misreport those studies, so they are
@@ -185,14 +200,35 @@ def _index_summaries(
     return by_key
 
 
+def _combinations_present(
+    summaries: dict[str, dict[str, Any]]
+) -> tuple[tuple[str, ...], ...]:
+    """Ablation combinations this sweep actually covers, in display order.
+
+    ALL_COMBINATION_ORDER lists both the current FLANK groups and the
+    superseded PROT ones so either sweep renders. Filtering here keeps the
+    other half out of the table instead of emitting permanently blank rows.
+    """
+    seen = {
+        _combination_key(row.get("feature_groups", ""))
+        for row in summaries.values()
+    }
+    return tuple(
+        combination
+        for combination in ALL_COMBINATION_ORDER
+        if tuple(sorted(combination)) in seen
+    )
+
+
 def _model_entries(
     by_key: dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]],
     model_type: str,
     paper_order: tuple[str, ...],
+    combination_order: tuple[tuple[str, ...], ...] = FEATURE_COMBINATION_ORDER,
 ) -> list[tuple[str, dict[str, Any] | None]]:
-    """The rows one model contributes: 15 ablations, then the paper feature sets."""
+    """The rows one model contributes: the ablations, then the paper feature sets."""
     entries: list[tuple[str, dict[str, Any] | None]] = []
-    for combination in FEATURE_COMBINATION_ORDER:
+    for combination in combination_order:
         label = " + ".join(GROUP_LABELS[group] for group in combination)
         entries.append(
             (label, by_key.get((model_type, "proposed", tuple(sorted(combination)))))
@@ -227,9 +263,12 @@ def build_internal_table(
     """
     by_key = _index_summaries(summaries)
     paper_order = _paper_sets_present(summaries)
+    combination_order = _combinations_present(summaries)
     rows: list[list[str]] = []
     for model_type in model_order:
-        for note, row in _model_entries(by_key, model_type, paper_order):
+        for note, row in _model_entries(
+            by_key, model_type, paper_order, combination_order
+        ):
             cells = [MODEL_LABELS.get(model_type, model_type), note]
             if row is None:
                 cells.extend([""] * len(METRICS))

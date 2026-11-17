@@ -39,23 +39,28 @@ from typing import Any, Iterable, Sequence
 N_FOLDS = 5
 # Canonical order, matching ML.experiment_matrix.FEATURE_GROUPS. It defines the
 # tuple stored in the summary CSV and therefore each run's experiment_id.
-FEATURE_GROUPS = ("aac", "dpc", "protein", "biological")
+FEATURE_GROUPS = ("aac", "dpc", "flank", "biological")
 # Display order, matching ML.summary_table and the manuscript table, where BIO
-# precedes PROT. Only affects how a combination is printed.
-DISPLAY_ORDER = ("aac", "dpc", "biological", "protein")
+# precedes the fourth group. Only affects how a combination is printed.
+DISPLAY_ORDER = ("aac", "dpc", "biological", "flank", "protein")
 GROUP_LABELS = {
     "aac": "AAC",
     "dpc": "DPC",
     "protein": "PROT",
+    "flank": "FLANK",
     "biological": "BIO",
 }
 # Feature counts per group on the cleaned B-cell data; the groups are disjoint
 # so a combination's width is their sum. test_selection.py asserts these still
 # match build_feature_frame, so drift cannot go unnoticed.
+# "flank" is 44 only while FLANK_SPLIT_SIDES is on: (20 residues + X) per side
+# plus the two availability counts. The width does not depend on FLANK_WINDOW.
+# "protein" is kept for the superseded sweep that still used it.
 GROUP_FEATURE_COUNTS = {
     "aac": 22,
     "dpc": 400,
     "protein": 23,
+    "flank": 44,
     "biological": 8,
 }
 METRIC_COLUMNS = {
@@ -104,8 +109,20 @@ def _metric_pair(row: dict[str, Any], metric: str) -> tuple[float, float] | None
     return None
 
 
-def read_proposed_runs(paths: Iterable[Path], metric: str) -> list[dict[str, Any]]:
-    """Collect successful proposed-arm runs, one record per (model, combination)."""
+def read_proposed_runs(
+    paths: Iterable[Path],
+    metric: str,
+    drop_superseded_groups: bool = False,
+    skipped: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Collect successful proposed-arm runs, one record per (model, combination).
+
+    Rows whose feature groups the current matrix no longer produces abort the
+    read. Set drop_superseded_groups to skip them instead, which is how a
+    sweep made under the previous matrix contributes only the combinations
+    the two matrices share. Pass a dict as skipped to receive the per-group
+    counts, so reuse is reported rather than silent.
+    """
     records: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
     for path in paths:
         if not path.is_file():
@@ -119,11 +136,27 @@ def read_proposed_runs(paths: Iterable[Path], metric: str) -> list[dict[str, Any
                 raw_groups = (row.get("feature_groups") or "").strip()
                 if not raw_groups or raw_groups == "profile_defined":
                     continue
-                groups = tuple(
-                    group
-                    for group in FEATURE_GROUPS
-                    if group in {part.strip() for part in raw_groups.split(",")}
-                )
+                parts = {part.strip() for part in raw_groups.split(",")}
+                # Silently dropping a group the current matrix no longer
+                # produces would collapse "aac,protein" onto "aac" and
+                # overwrite a genuine run. A superseded sweep must be
+                # rejected, not quietly merged into the current one.
+                unknown = sorted(parts.difference(FEATURE_GROUPS))
+                if unknown and drop_superseded_groups:
+                    if skipped is not None:
+                        for group in unknown:
+                            skipped[group] = skipped.get(group, 0) + 1
+                    continue
+                if unknown:
+                    raise ValueError(
+                        f"{path} row {row.get('experiment_id')!r} uses feature "
+                        f"groups {unknown} that the current matrix does not "
+                        f"produce (it has {list(FEATURE_GROUPS)}). This summary "
+                        "comes from a superseded sweep and cannot be combined "
+                        "with the current one. Pass --drop-superseded-groups "
+                        "to use only the combinations both matrices share."
+                    )
+                groups = tuple(group for group in FEATURE_GROUPS if group in parts)
                 pair = _metric_pair(row, metric)
                 if pair is None:
                     continue
@@ -337,6 +370,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--drop-superseded-groups",
+        action="store_true",
+        help=(
+            "Skip rows whose feature groups the current matrix no longer "
+            "produces (for example PROT) instead of refusing the file. Use "
+            "when reusing the combinations an earlier sweep shares with this "
+            "one; the skipped rows are reported."
+        ),
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -349,7 +392,19 @@ def main() -> None:
     except (AttributeError, OSError):
         pass
 
-    records = read_proposed_runs(args.summaries, args.metric)
+    skipped: dict[str, int] = {}
+    records = read_proposed_runs(
+        args.summaries, args.metric, args.drop_superseded_groups, skipped
+    )
+    if skipped:
+        detail = ", ".join(
+            f"{group}={count}" for group, count in sorted(skipped.items())
+        )
+        print(
+            f"Melewati {sum(skipped.values())} baris dari matriks lama "
+            f"({detail}). Hanya kombinasi yang dimiliki kedua matriks yang "
+            "dipakai ulang."
+        )
     if not records:
         raise SystemExit(
             "No successful proposed-arm runs with the requested metric were "
@@ -375,7 +430,9 @@ def main() -> None:
 
     sensitivity = None
     if args.sensitivity_metric != args.metric:
-        other = read_proposed_runs(args.summaries, args.sensitivity_metric)
+        other = read_proposed_runs(
+            args.summaries, args.sensitivity_metric, args.drop_superseded_groups
+        )
         if other:
             sensitivity = select_consensus(other)
             agrees = (

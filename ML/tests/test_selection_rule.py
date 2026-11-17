@@ -40,8 +40,10 @@ class FeatureCountTests(unittest.TestCase):
             {
                 "peptide_seq": ["ACDEFGHIKL", "MNPQRSTVWY"],
                 "protein_seq": ["ACDEFGHIKLMNPQRSTVWY"] * 2,
-                "start_position": [1, 2],
-                "end_position": [10, 11],
+                # Real coordinates: flank features refuse to build unless the
+                # peptide actually sits at start_position..end_position.
+                "start_position": [1, 11],
+                "end_position": [10, 20],
                 "chou_fasman": [1.0, 1.0],
                 "emini": [1.0, 1.0],
                 "kolaskar_tongaonkar": [1.0, 1.0],
@@ -58,6 +60,7 @@ class FeatureCountTests(unittest.TestCase):
                 "use_dpc_features": group == "dpc",
                 "use_protein_features": group == "protein",
                 "use_biological_features": group == "biological",
+                "use_flank_features": group == "flank",
             }
             columns = build_feature_frame(
                 frame, use_peptide_features=False, **kwargs

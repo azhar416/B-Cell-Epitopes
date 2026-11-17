@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 
 from ML.summary_table import (
     FEATURE_COMBINATION_ORDER,
+    SUPERSEDED_COMBINATION_ORDER,
     METRICS,
     build_internal_table,
     internal_header,
@@ -94,18 +95,18 @@ class InternalLayoutTests(unittest.TestCase):
                 "AAC",
                 "AAC + DPC",
                 "AAC + BIO",
-                "AAC + PROT",
+                "AAC + FLANK",
                 "AAC + DPC + BIO",
-                "AAC + DPC + PROT",
-                "AAC + BIO + PROT",
-                "AAC + DPC + BIO + PROT",
+                "AAC + DPC + FLANK",
+                "AAC + BIO + FLANK",
+                "AAC + DPC + BIO + FLANK",
                 "DPC",
                 "DPC + BIO",
-                "DPC + PROT",
-                "DPC + BIO + PROT",
+                "DPC + FLANK",
+                "DPC + BIO + FLANK",
                 "BIO",
-                "BIO + PROT",
-                "PROT",
+                "BIO + FLANK",
+                "FLANK",
             ],
         )
 
@@ -159,6 +160,42 @@ class InternalLayoutTests(unittest.TestCase):
         self.assertEqual(lines[0].split("\t")[:2], ["Model", "Note"])
         self.assertEqual({len(line.split("\t")) for line in lines}, {9})
         self.assertIn("0.5000 ± 0.0100", lines[1])
+
+
+class SupersededSweepTests(unittest.TestCase):
+    """The phase-1 sweep that used PROT must still render from its summary."""
+
+    def test_protein_rows_appear_only_when_the_sweep_contains_them(self):
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [
+                    _run("svm", "proposed", combination)
+                    for combination in SUPERSEDED_COMBINATION_ORDER
+                ],
+            )
+            table = build_internal_table(read_summaries([path]), model_order=("svm",))
+
+        notes = [row[1] for row in table]
+        self.assertEqual(len(notes), len(SUPERSEDED_COMBINATION_ORDER))
+        self.assertIn("PROT", notes)
+        self.assertIn("AAC + DPC + BIO + PROT", notes)
+        self.assertNotIn("FLANK", notes)
+
+    def test_a_flank_sweep_shows_no_protein_rows(self):
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [
+                    _run("svm", "proposed", combination)
+                    for combination in FEATURE_COMBINATION_ORDER
+                ],
+            )
+            table = build_internal_table(read_summaries([path]), model_order=("svm",))
+
+        notes = [row[1] for row in table]
+        self.assertEqual(len(notes), 15)
+        self.assertTrue(all("PROT" not in note for note in notes))
 
 
 if __name__ == "__main__":

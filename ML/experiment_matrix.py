@@ -10,6 +10,7 @@ import itertools
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 from ML.CFG import CFG, PROJECT_ROOT
@@ -104,7 +105,26 @@ MODEL_TYPES = (
     "extra_trees",
     "xgboost",
 )
-FEATURE_GROUPS = ("aac", "dpc", "protein", "biological")
+# "protein" was replaced by "flank" after the phase-1 sweep: protein-level
+# composition is constant within a protein, so under protein-grouped folds it
+# acts as a protein identifier rather than a feature. "flank" carries the
+# peptide's neighbourhood instead, which varies peptide by peptide.
+FEATURE_GROUPS = ("aac", "dpc", "flank", "biological")
+ALL_COMBINATIONS = tuple(
+    combination
+    for size in range(1, len(FEATURE_GROUPS) + 1)
+    for combination in itertools.combinations(FEATURE_GROUPS, size)
+)
+# The combinations that changed when PROT became FLANK. The other seven are
+# built from identical switches and carry identical experiment_ids, so a
+# phase-1 sweep made under the old matrix still covers them.
+FLANK_COMBINATIONS = tuple(c for c in ALL_COMBINATIONS if "flank" in c)
+UNCHANGED_COMBINATIONS = tuple(c for c in ALL_COMBINATIONS if "flank" not in c)
+# Cheapest two of the unchanged combinations. Rerunning them alongside a
+# flank sweep shows empirically whether the earlier sweep ran in this same
+# environment, which the earlier summaries cannot prove on their own because
+# they predate library-version recording.
+REPRODUCTION_CHECK_COMBINATIONS = (("aac",), ("aac", "biological"))
 
 
 @dataclass(frozen=True)
@@ -131,24 +151,55 @@ class ExperimentSpec:
 def build_experiment_matrix(
     model_types: tuple[str, ...] | None = None,
     feature_groups: tuple[str, ...] | None = None,
+    feature_combinations: Iterable[Iterable[str]] | None = None,
+    include_comparisons: bool = True,
 ) -> list[ExperimentSpec]:
     """Build all proposed ablations and fixed-profile comparison runs.
 
     Passing feature_groups restricts the proposed arm to that single frozen
     combination, which is what phase 2 runs once a configuration is selected.
+    Passing feature_combinations restricts it to several, which is how a
+    partial sweep reruns only the combinations that changed.
+    Set include_comparisons=False to leave out the paper feature sets when an
+    earlier sweep already covered them.
     """
+    if feature_groups is not None and feature_combinations is not None:
+        raise ValueError(
+            "Pass feature_groups (one combination) or feature_combinations "
+            "(several), not both."
+        )
     selected_models = tuple(model_types) if model_types else MODEL_TYPES
     unknown_models = [model for model in selected_models if model not in MODEL_TYPES]
     if unknown_models:
         raise ValueError(f"Unsupported model types: {sorted(unknown_models)}.")
 
     specs: list[ExperimentSpec] = []
-    if feature_groups is None:
-        proposed_combinations = [
-            combination
-            for size in range(1, len(FEATURE_GROUPS) + 1)
-            for combination in itertools.combinations(FEATURE_GROUPS, size)
-        ]
+    if feature_combinations is not None:
+        requested = [tuple(combination) for combination in feature_combinations]
+        if not requested:
+            raise ValueError("At least one feature combination must be selected.")
+        unknown_groups = sorted(
+            {
+                group
+                for combination in requested
+                for group in combination
+                if group not in FEATURE_GROUPS
+            }
+        )
+        if unknown_groups:
+            raise ValueError(f"Unsupported feature groups: {unknown_groups}.")
+        # Canonical order keeps every experiment_id identical to a full sweep.
+        proposed_combinations = []
+        for combination in requested:
+            canonical = tuple(
+                group for group in FEATURE_GROUPS if group in set(combination)
+            )
+            if not canonical:
+                raise ValueError("A feature combination must not be empty.")
+            if canonical not in proposed_combinations:
+                proposed_combinations.append(canonical)
+    elif feature_groups is None:
+        proposed_combinations = list(ALL_COMBINATIONS)
     else:
         unknown_groups = [
             group for group in feature_groups if group not in FEATURE_GROUPS
@@ -167,13 +218,15 @@ def build_experiment_matrix(
             ExperimentSpec("proposed", model_type, combination)
             for combination in proposed_combinations
         )
-        specs.extend(
-            ExperimentSpec(feature_set, model_type)
-            for feature_set in FEATURE_SETS
-            if feature_set != "proposed"
-        )
+        if include_comparisons:
+            specs.extend(
+                ExperimentSpec(feature_set, model_type)
+                for feature_set in FEATURE_SETS
+                if feature_set != "proposed"
+            )
 
-    expected = len(selected_models) * (len(proposed_combinations) + len(FEATURE_SETS) - 1)
+    comparison_count = (len(FEATURE_SETS) - 1) if include_comparisons else 0
+    expected = len(selected_models) * (len(proposed_combinations) + comparison_count)
     if len(specs) != expected:
         raise RuntimeError(
             f"Expected {expected} experiment configurations; got {len(specs)}."
@@ -200,6 +253,7 @@ def _configure_run(base_config: CFG, spec: ExperimentSpec, output_root: Path) ->
         config.USE_DPC_FEATURES = "dpc" in active_groups
         config.USE_PROTEIN_FEATURES = "protein" in active_groups
         config.USE_BIOLOGICAL_FEATURES = "biological" in active_groups
+        config.USE_FLANK_FEATURES = "flank" in active_groups
     return config
 
 
@@ -336,6 +390,8 @@ def run_experiment_matrix(
     training_mode: str | None = None,
     model_types: tuple[str, ...] | None = None,
     feature_groups: tuple[str, ...] | None = None,
+    feature_combinations: Iterable[Iterable[str]] | None = None,
+    include_comparisons: bool = True,
     tuning_metric: str | None = None,
     resume: bool = False,
 ) -> list[dict[str, Any]]:
@@ -357,7 +413,12 @@ def run_experiment_matrix(
         if output_root is not None
         else PROJECT_ROOT / "ML" / "artifacts" / "experiment_matrix"
     )
-    specs = build_experiment_matrix(model_types, feature_groups)
+    specs = build_experiment_matrix(
+        model_types,
+        feature_groups,
+        feature_combinations=feature_combinations,
+        include_comparisons=include_comparisons,
+    )
     _preflight(base_config, specs)
     # Warn rather than refuse: a deliberate robustness run in another
     # environment is legitimate. The hard gate sits where it matters, in

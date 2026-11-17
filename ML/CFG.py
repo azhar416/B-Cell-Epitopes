@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ML.pre_dataset import FLANK_WINDOW_DEFAULT
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,8 +21,20 @@ class CFG:
     TRAINING_MODE: str = "external_sars"
     FEATURE_SET: str = "proposed"
     USE_PEPTIDE_FEATURES: bool = False
+    # Aggregated over the whole parent protein, so every peptide of a protein
+    # shares one value. Under protein-grouped folds that makes it a protein
+    # identifier; kept only to reproduce that negative result, and no longer
+    # part of the experiment matrix.
     USE_PROTEIN_FEATURES: bool = False
     USE_BIOLOGICAL_FEATURES: bool = True
+    # Composition of the residues flanking the peptide in its parent protein.
+    # Peptide-local, unlike USE_PROTEIN_FEATURES.
+    USE_FLANK_FEATURES: bool = False
+    FLANK_WINDOW: int = FLANK_WINDOW_DEFAULT
+    # Left and right kept apart: composition inside and beside an epitope
+    # correlates with the label in opposite directions for several residues,
+    # and one merged block would cancel that.
+    FLANK_SPLIT_SIDES: bool = True
     # None preserves the legacy behavior of USE_PEPTIDE_FEATURES and
     # PEPTIDE_FEATURE_TYPE; explicit booleans make AAC/DPC independent groups.
     USE_AAC_FEATURES: bool | None = None
@@ -203,9 +217,17 @@ class CFG:
             "USE_PEPTIDE_FEATURES",
             "USE_PROTEIN_FEATURES",
             "USE_BIOLOGICAL_FEATURES",
+            "USE_FLANK_FEATURES",
+            "FLANK_SPLIT_SIDES",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
+        if not isinstance(self.FLANK_WINDOW, int) or isinstance(
+            self.FLANK_WINDOW, bool
+        ):
+            raise ValueError("FLANK_WINDOW must be an integer.")
+        if self.FLANK_WINDOW < 1:
+            raise ValueError("FLANK_WINDOW must be positive.")
         for name in ("USE_AAC_FEATURES", "USE_DPC_FEATURES"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, bool):
@@ -223,6 +245,7 @@ class CFG:
                 self.EFFECTIVE_DPC_FEATURES,
                 self.USE_PROTEIN_FEATURES,
                 self.USE_BIOLOGICAL_FEATURES,
+                self.USE_FLANK_FEATURES,
             )
         ):
             raise ValueError("At least one feature group must be enabled.")
