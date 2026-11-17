@@ -25,6 +25,7 @@ from ML.selection import (
     resolve_scale_pos_weight,
 )
 from ML.summary_table import (
+    full_row_plan,
     FEATURE_COMBINATION_ORDER,
     PAPER_ORDER,
     build_table,
@@ -145,7 +146,8 @@ class TwoPhaseSweepTests(unittest.TestCase):
 
         modes = {call.args[0].TRAINING_MODE for call in mocked.call_args_list}
         self.assertEqual(modes, {"same_dataset"})
-        self.assertEqual(len(rows), 18)
+        # 15 power-set + 10 contrast + 2 reconstruction + 3 published.
+        self.assertEqual(len(rows), 31)
         self.assertTrue(all(row["training_mode"] == "same_dataset" for row in rows))
 
     def test_phase_two_uses_the_external_mode(self):
@@ -165,9 +167,11 @@ class TwoPhaseSweepTests(unittest.TestCase):
         self.assertEqual(modes, {"external_sars"})
 
     def test_restricting_models_scales_the_matrix(self):
-        self.assertEqual(len(build_experiment_matrix(("svm",))), 18)
-        self.assertEqual(len(build_experiment_matrix(("svm", "xgboost"))), 36)
-        self.assertEqual(len(build_experiment_matrix()), 90)
+        self.assertEqual(len(build_experiment_matrix(("xgboost",))), 31)
+        self.assertEqual(
+            len(build_experiment_matrix(("xgboost", "random_forest"))), 62
+        )
+        self.assertEqual(len(build_experiment_matrix()), 124)
 
     def test_unknown_model_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -434,11 +438,11 @@ class SummaryTableTests(unittest.TestCase):
     def test_table_has_one_block_per_model_in_display_order(self):
         rows = build_table({}, model_order=("random_forest", "xgboost"))
 
-        expected = len(FEATURE_COMBINATION_ORDER) + len(PAPER_ORDER)
+        expected = len(full_row_plan())
         self.assertEqual(len(rows), 2 * expected)
         self.assertEqual(rows[0][1], "RF")
         self.assertEqual(rows[expected][1], "XGBOOST")
-        self.assertEqual(rows[0][2], "AAC")
+        self.assertEqual(rows[0][2], "AAC + LEN")
         self.assertEqual(rows[expected - 1][2], "FS-5 (BLMPred 2026)")
 
     def test_missing_runs_are_marked_false_with_empty_metrics(self):
@@ -454,7 +458,7 @@ class SummaryTableTests(unittest.TestCase):
                 "status": "success",
                 "model_type": "random_forest",
                 "feature_set": "proposed",
-                "feature_groups": "aac",
+                "feature_groups": "aac,len",
                 "bcell_oof_roc_auc": "0.6167",
                 "bcell_oof_std_roc_auc": "0.0269",
                 "external_sars_bcell_selected_threshold_roc_auc": "0.5884",
@@ -481,7 +485,10 @@ class SummaryTableTests(unittest.TestCase):
         }
 
         rows = build_table(summaries, model_order=("svm",))
-        paper_row = rows[len(FEATURE_COMBINATION_ORDER)]
+        plan = full_row_plan()
+        paper_row = rows[
+            next(i for i, entry in enumerate(plan) if entry[1] == "perbandingan_1")
+        ]
 
         self.assertEqual(paper_row[2], "FS-1 (Cihan et al. 2022)")
         self.assertEqual(paper_row[3], "0.6100 ± 0.0300")
@@ -494,7 +501,7 @@ class SummaryTableTests(unittest.TestCase):
                 "status": "failed",
                 "model_type": "random_forest",
                 "feature_set": "proposed",
-                "feature_groups": "aac",
+                "feature_groups": "aac,len",
                 "bcell_oof_roc_auc": "0.9999",
             }
         }
@@ -514,7 +521,7 @@ class SummaryTableTests(unittest.TestCase):
                         "status": "success",
                         "model_type": "random_forest",
                         "feature_set": "proposed",
-                        "feature_groups": "aac",
+                        "feature_groups": "aac,len",
                         "bcell_oof_roc_auc": "0.6167",
                         "bcell_oof_std_roc_auc": "0.0269",
                     }
@@ -528,7 +535,7 @@ class SummaryTableTests(unittest.TestCase):
                         "status": "success",
                         "model_type": "random_forest",
                         "feature_set": "proposed",
-                        "feature_groups": "aac",
+                        "feature_groups": "aac,len",
                         "external_sars_bcell_selected_threshold_roc_auc": "0.5884",
                     }
                 ],

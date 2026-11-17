@@ -39,29 +39,50 @@ from typing import Any, Iterable, Sequence
 N_FOLDS = 5
 # Canonical order, matching ML.experiment_matrix.FEATURE_GROUPS. It defines the
 # tuple stored in the summary CSV and therefore each run's experiment_id.
-FEATURE_GROUPS = ("aac", "dpc", "flank", "biological")
-# Display order, matching ML.summary_table and the manuscript table, where BIO
-# precedes the fourth group. Only affects how a combination is printed.
-DISPLAY_ORDER = ("aac", "dpc", "biological", "flank", "protein")
+# Every group a selectable combination may contain: the power set
+# ML.experiment_matrix.FEATURE_GROUPS plus its ALWAYS_ON_GROUPS. Contrast runs
+# carry feature_set="kontras" and are filtered out before the groups are read,
+# so no protein-level group can enter the frozen configuration.
+FEATURE_GROUPS = ("aac", "dpc", "prop", "flank", "len")
+DISPLAY_ORDER = (
+    "aac", "dpc", "prop", "flank", "len",
+    "protglobal", "protlen", "pos", "protid",
+    "biological", "protein",
+)
 GROUP_LABELS = {
     "aac": "AAC",
     "dpc": "DPC",
-    "protein": "PROT",
+    "prop": "PROP",
     "flank": "FLANK",
+    "len": "LEN",
+    "protglobal": "PROTGLOBAL",
+    "protlen": "PROTLEN",
+    "pos": "POS",
+    "protid": "PROTID",
     "biological": "BIO",
+    "protein": "PROT",
 }
 # Feature counts per group on the cleaned B-cell data; the groups are disjoint
 # so a combination's width is their sum. test_selection.py asserts these still
 # match build_feature_frame, so drift cannot go unnoticed.
-# "flank" is 44 only while FLANK_SPLIT_SIDES is on: (20 residues + X) per side
-# plus the two availability counts. The width does not depend on FLANK_WINDOW.
-# "protein" is kept for the superseded sweep that still used it.
+# Widths on the cleaned B-cell data; the groups are disjoint so a
+# combination's width is their sum. test_selection_rule.py asserts these still
+# match build_feature_frame, so drift cannot go unnoticed. "flank" is 42 only
+# while FLANK_SPLIT_SIDES is on: 20 residues per side plus the two
+# availability counts; it does not depend on FLANK_WINDOW. "biological" and
+# "protein" are kept so a superseded summary still prints.
 GROUP_FEATURE_COUNTS = {
-    "aac": 22,
+    "aac": 20,
     "dpc": 400,
-    "protein": 23,
-    "flank": 44,
+    "prop": 4,
+    "flank": 42,
+    "len": 1,
+    "protglobal": 4,
+    "protlen": 1,
+    "pos": 2,
+    "protid": 1,
     "biological": 8,
+    "protein": 23,
 }
 METRIC_COLUMNS = {
     "roc_auc": ("mean_validation_roc_auc", "std_validation_roc_auc"),

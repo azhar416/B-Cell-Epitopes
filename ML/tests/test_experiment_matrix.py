@@ -10,6 +10,10 @@ from unittest.mock import patch
 from ML.CFG import CFG
 from ML.experiment_matrix import (
     CANONICAL_ENVIRONMENT,
+    ALWAYS_ON_GROUPS,
+    GROUPED_FEATURE_SETS,
+    canonical,
+    PROTEIN_GROUPS,
     FEATURE_GROUPS,
     FEATURE_SETS,
     MODEL_TYPES,
@@ -29,19 +33,30 @@ class ExperimentMatrixTests(unittest.TestCase):
     def test_matrix_has_all_requested_combinations(self):
         specs = build_experiment_matrix()
 
-        self.assertEqual(len(specs), 90)
+        # 5 models x (15 power-set + 10 contrast + 2 reconstruction + 3 paper).
+        self.assertEqual(len(specs), 124)
         self.assertEqual({spec.model_type for spec in specs}, set(MODEL_TYPES))
-        self.assertEqual({spec.feature_set for spec in specs}, set(FEATURE_SETS))
-        self.assertEqual(len({spec.experiment_id for spec in specs}), 90)
+        self.assertEqual(
+            {spec.feature_set for spec in specs},
+            set(FEATURE_SETS) | {"kontras"},
+        )
+        self.assertEqual(len({spec.experiment_id for spec in specs}), 124)
+        # Only the fixed-profile paper runs carry no groups; the contrast and
+        # reconstruction arms are group-driven like the proposed arm.
         self.assertTrue(
             all(
-                spec.feature_groups is None
+                (spec.feature_groups is None)
+                == (spec.feature_set not in GROUPED_FEATURE_SETS)
                 for spec in specs
-                if spec.feature_set != "proposed"
             )
         )
         proposed = [spec for spec in specs if spec.feature_set == "proposed"]
         self.assertEqual(len(proposed), len(MODEL_TYPES) * 15)
+        # Nothing protein-level may reach the arm the selection rule reads.
+        self.assertFalse(
+            {group for spec in proposed for group in spec.feature_groups}
+            & set(PROTEIN_GROUPS)
+        )
         self.assertEqual(
             {
                 spec.feature_groups
@@ -49,7 +64,7 @@ class ExperimentMatrixTests(unittest.TestCase):
                 if spec.model_type == MODEL_TYPES[0]
             },
             {
-                combination
+                canonical(combination + ALWAYS_ON_GROUPS)
                 for size in range(1, len(FEATURE_GROUPS) + 1)
                 for combination in itertools.combinations(FEATURE_GROUPS, size)
             },
@@ -58,12 +73,16 @@ class ExperimentMatrixTests(unittest.TestCase):
     def test_proposed_group_switches_and_output_paths_are_distinct(self):
         base = CFG()
         output_root = Path("matrix-output")
-        proposed = ExperimentSpec("proposed", "random_forest", ("aac", "protein"))
+        proposed = ExperimentSpec("proposed", "random_forest", ("aac", "prop", "len"))
         configured = _configure_run(base, proposed, output_root)
 
         self.assertTrue(configured.USE_AAC_FEATURES)
         self.assertFalse(configured.USE_DPC_FEATURES)
-        self.assertTrue(configured.USE_PROTEIN_FEATURES)
+        self.assertTrue(configured.USE_PROP_FEATURES)
+        self.assertFalse(configured.USE_FLANK_FEATURES)
+        self.assertTrue(configured.USE_LEN_FEATURES)
+        # Both historical blocks stay off whatever the base config said.
+        self.assertFalse(configured.USE_PROTEIN_FEATURES)
         self.assertFalse(configured.USE_BIOLOGICAL_FEATURES)
         self.assertEqual(configured.TRAINING_MODE, base.TRAINING_MODE)
         self.assertEqual(configured.RANDOM_STATE, base.RANDOM_STATE)
@@ -72,7 +91,7 @@ class ExperimentMatrixTests(unittest.TestCase):
             _configure_run(base, spec, output_root).OUTPUT_DIR
             for spec in build_experiment_matrix()
         }
-        self.assertEqual(len(paths), 90)
+        self.assertEqual(len(paths), 124)
 
     def test_comparison_profiles_keep_existing_feature_switches(self):
         base = CFG()
@@ -102,13 +121,13 @@ class ExperimentMatrixTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     rows = run_experiment_matrix(temporary_directory)
 
-            self.assertEqual(mocked_training.call_count, 90)
+            self.assertEqual(mocked_training.call_count, 124)
             self.assertTrue(all(row["status"] == "success" for row in rows))
             self.assertTrue(all(row["tuning_metric"] == "roc_auc" for row in rows))
             summary_path = Path(temporary_directory) / "experiment_summary.csv"
             with summary_path.open(newline="", encoding="utf-8") as summary_file:
                 summary_rows = list(csv.DictReader(summary_file))
-            self.assertEqual(len(summary_rows), 90)
+            self.assertEqual(len(summary_rows), 124)
             self.assertEqual(
                 {row["status"] for row in summary_rows}, {"success"}
             )

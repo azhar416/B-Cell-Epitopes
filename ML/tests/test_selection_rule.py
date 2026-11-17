@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 
 from ML.experiment_matrix import build_experiment_matrix
 from ML.pre_dataset import build_feature_frame
+from ML.experiment_matrix import GROUP_SWITCHES
 from ML.select_configuration import (
     GROUP_FEATURE_COUNTS,
     combination_label,
@@ -54,14 +55,17 @@ class FeatureCountTests(unittest.TestCase):
                 "stability": [30.0, 30.0],
             }
         )
+        frame["parent_protein_id"] = ["P1", "P1"]
+        # Derived from GROUP_SWITCHES so a new group cannot be added to the
+        # matrix without its width being checked here too.
+        switches = {
+            group: switch.lower() for group, switch in GROUP_SWITCHES.items()
+        }
+        switches["biological"] = "use_biological_features"
+        switches["protein"] = "use_protein_features"
+        self.assertEqual(set(switches), set(GROUP_FEATURE_COUNTS))
         for group in GROUP_FEATURE_COUNTS:
-            kwargs = {
-                "use_aac_features": group == "aac",
-                "use_dpc_features": group == "dpc",
-                "use_protein_features": group == "protein",
-                "use_biological_features": group == "biological",
-                "use_flank_features": group == "flank",
-            }
+            kwargs = {name: name == switches[group] for name in switches.values()}
             columns = build_feature_frame(
                 frame, use_peptide_features=False, **kwargs
             ).shape[1]
@@ -72,11 +76,13 @@ class FeatureCountTests(unittest.TestCase):
             )
 
     def test_combination_width_is_the_sum_of_its_groups(self):
-        self.assertEqual(feature_count(("aac", "biological")), 30)
-        self.assertEqual(feature_count(("aac", "dpc", "protein", "biological")), 453)
+        self.assertEqual(feature_count(("aac", "prop")), 24)
+        self.assertEqual(feature_count(("aac", "prop", "flank", "len")), 67)
+        self.assertEqual(feature_count(("aac", "prop", "flank", "len", "dpc")), 467)
 
     def test_label_uses_canonical_order_regardless_of_input_order(self):
-        self.assertEqual(combination_label(("biological", "aac")), "AAC + BIO")
+        self.assertEqual(combination_label(("prop", "aac")), "AAC + PROP")
+        self.assertEqual(combination_label(("len", "flank")), "FLANK + LEN")
         self.assertEqual(combination_label(("protein", "dpc")), "DPC + PROT")
 
 
@@ -85,25 +91,25 @@ class OneStandardErrorTests(unittest.TestCase):
         records = [
             # Widest combination has the top mean but only by 0.004, while its
             # SE is 0.05/sqrt(5) = 0.0224, so the simpler one must win.
-            _record("rf", ("aac", "dpc", "protein", "biological"), 0.640, 0.050),
-            _record("rf", ("aac", "biological"), 0.636, 0.030),
+            _record("rf", ("aac", "prop", "flank", "len"), 0.640, 0.050),
+            _record("rf", ("aac", "prop"), 0.636, 0.030),
         ]
 
         result = select_consensus(records)
 
-        self.assertEqual(result["best_label"], "AAC + DPC + BIO + PROT")
-        self.assertEqual(result["chosen"]["label"], "AAC + BIO")
+        self.assertEqual(result["best_label"], "AAC + PROP + FLANK + LEN")
+        self.assertEqual(result["chosen"]["label"], "AAC + PROP")
         self.assertEqual(len(result["within_one_se"]), 2)
 
     def test_clearly_better_combination_is_kept_even_if_complex(self):
         records = [
-            _record("rf", ("aac", "dpc", "protein", "biological"), 0.700, 0.010),
-            _record("rf", ("biological",), 0.600, 0.010),
+            _record("rf", ("aac", "prop", "flank", "len"), 0.700, 0.010),
+            _record("rf", ("prop",), 0.600, 0.010),
         ]
 
         result = select_consensus(records)
 
-        self.assertEqual(result["chosen"]["label"], "AAC + DPC + BIO + PROT")
+        self.assertEqual(result["chosen"]["label"], "AAC + PROP + FLANK + LEN")
         self.assertEqual(len(result["within_one_se"]), 1)
 
     def test_ties_on_size_break_towards_the_steadier_candidate(self):
@@ -129,28 +135,28 @@ class OneStandardErrorTests(unittest.TestCase):
         records = [
             _record("rf", ("aac",), 0.70, 0.01),
             _record("svm", ("aac",), 0.50, 0.01),
-            _record("rf", ("biological",), 0.61, 0.01),
-            _record("svm", ("biological",), 0.60, 0.01),
+            _record("rf", ("prop",), 0.61, 0.01),
+            _record("svm", ("prop",), 0.60, 0.01),
         ]
 
         result = select_consensus(records)
 
-        # AAC averages 0.60 while BIO averages 0.605, so BIO leads despite
+        # AAC averages 0.60 while PROP averages 0.605, so PROP leads despite
         # losing badly on random_forest alone.
-        self.assertEqual(result["best_label"], "BIO")
+        self.assertEqual(result["best_label"], "PROP")
 
     def test_per_model_selection_is_independent_per_classifier(self):
         records = [
             _record("rf", ("aac",), 0.70, 0.001),
-            _record("rf", ("biological",), 0.50, 0.001),
+            _record("rf", ("prop",), 0.50, 0.001),
             _record("svm", ("aac",), 0.50, 0.001),
-            _record("svm", ("biological",), 0.70, 0.001),
+            _record("svm", ("prop",), 0.70, 0.001),
         ]
 
         result = select_per_model(records)
 
         self.assertEqual(result["rf"]["chosen"]["label"], "AAC")
-        self.assertEqual(result["svm"]["chosen"]["label"], "BIO")
+        self.assertEqual(result["svm"]["chosen"]["label"], "PROP")
 
     def test_empty_candidate_set_is_an_error(self):
         with self.assertRaises(ValueError):
@@ -175,7 +181,7 @@ class SummaryParsingTests(unittest.TestCase):
                 "status": "success",
                 "model_type": "random_forest",
                 "feature_set": "proposed",
-                "feature_groups": "aac,biological",
+                "feature_groups": "aac,prop",
                 "mean_validation_roc_auc": "0.63",
                 "std_validation_roc_auc": "0.02",
             },
@@ -203,7 +209,7 @@ class SummaryParsingTests(unittest.TestCase):
             records = read_proposed_runs([path], "roc_auc")
 
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["label"], "AAC + BIO")
+        self.assertEqual(records[0]["label"], "AAC + PROP")
 
     def test_phase_two_summaries_fall_back_to_bcell_oof_columns(self):
         rows = [
@@ -232,7 +238,7 @@ class SummaryParsingTests(unittest.TestCase):
                 "status": "success",
                 "model_type": "svm",
                 "feature_set": "proposed",
-                "feature_groups": "biological,aac",
+                "feature_groups": "prop,aac",
                 "mean_validation_roc_auc": "0.61",
                 "std_validation_roc_auc": "0.03",
             }
@@ -241,7 +247,7 @@ class SummaryParsingTests(unittest.TestCase):
             path = self._write(Path(directory), rows)
             records = read_proposed_runs([path], "roc_auc")
 
-        self.assertEqual(records[0]["feature_groups"], ("aac", "biological"))
+        self.assertEqual(records[0]["feature_groups"], ("aac", "prop"))
 
 
 class TuningProtocolProvenanceTests(unittest.TestCase):
@@ -403,28 +409,29 @@ class TuningProtocolProvenanceTests(unittest.TestCase):
 
 class FrozenCombinationRunTests(unittest.TestCase):
     def test_freezing_a_combination_yields_the_phase_two_matrix(self):
-        specs = build_experiment_matrix(feature_groups=("aac", "biological"))
+        specs = build_experiment_matrix(feature_groups=("aac", "prop", "len"))
 
         proposed = [spec for spec in specs if spec.feature_set == "proposed"]
         baselines = [spec for spec in specs if spec.feature_set != "proposed"]
 
-        self.assertEqual(len(specs), 20)
-        self.assertEqual(len(proposed), 5)
-        self.assertEqual(len(baselines), 15)
+        # 4 models x (1 frozen combination + 3 paper feature sets).
+        self.assertEqual(len(specs), 16)
+        self.assertEqual(len(proposed), 4)
+        self.assertEqual(len(baselines), 12)
         self.assertEqual(
-            {spec.feature_groups for spec in proposed}, {("aac", "biological")}
+            {spec.feature_groups for spec in proposed}, {("aac", "prop", "len")}
         )
 
     def test_frozen_experiment_id_matches_the_phase_one_run(self):
         full = build_experiment_matrix(("random_forest",))
         frozen = build_experiment_matrix(
-            ("random_forest",), feature_groups=("biological", "aac")
+            ("random_forest",), feature_groups=("prop", "len", "aac")
         )
 
         frozen_proposed = [s for s in frozen if s.feature_set == "proposed"][0]
         self.assertIn(frozen_proposed.experiment_id, {s.experiment_id for s in full})
         self.assertEqual(
-            frozen_proposed.experiment_id, "proposed__random_forest__aac__biological"
+            frozen_proposed.experiment_id, "proposed__random_forest__aac__prop__len"
         )
 
     def test_unknown_feature_group_is_rejected(self):

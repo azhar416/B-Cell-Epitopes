@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import math
 import sys
 from pathlib import Path
@@ -43,54 +44,89 @@ MODEL_LABELS = {
     "logistic_regression": "LR",
     "extra_trees": "ET",
 }
+# Must match ML.experiment_matrix.MODEL_TYPES. SVM is no longer swept; its
+# label stays in MODEL_LABELS so an earlier summary still renders.
 DEFAULT_MODEL_ORDER = (
     "random_forest",
-    "xgboost",
-    "svm",
     "logistic_regression",
     "extra_trees",
+    "xgboost",
 )
 
 GROUP_LABELS = {
     "aac": "AAC",
     "dpc": "DPC",
+    "prop": "PROP",
+    "flank": "FLANK",
+    "len": "LEN",
+    "protglobal": "PROTGLOBAL",
+    "protlen": "PROTLEN",
+    "pos": "POS",
+    "protid": "PROTID",
     "biological": "BIO",
     "protein": "PROT",
-    "flank": "FLANK",
 }
-# Display order used in the manuscript table: AAC-first combinations, then DPC,
-# then BIO, then the fourth group alone.
+# Part 1, in manuscript order: AAC-first, then PROP, then FLANK, then DPC.
+# LEN is in every row, so the labels name it last rather than repeating it in
+# front. This is the only arm the selection rule reads.
 FEATURE_COMBINATION_ORDER = (
-    ("aac",),
-    ("aac", "dpc"),
-    ("aac", "biological"),
-    ("aac", "flank"),
-    ("aac", "dpc", "biological"),
-    ("aac", "dpc", "flank"),
-    ("aac", "biological", "flank"),
-    ("aac", "dpc", "biological", "flank"),
-    ("dpc",),
-    ("dpc", "biological"),
-    ("dpc", "flank"),
-    ("dpc", "biological", "flank"),
-    ("biological",),
-    ("biological", "flank"),
-    ("flank",),
+    ("aac", "len"),
+    ("aac", "prop", "len"),
+    ("aac", "flank", "len"),
+    ("aac", "prop", "flank", "len"),
+    ("prop", "len"),
+    ("prop", "flank", "len"),
+    ("flank", "len"),
+    ("aac", "dpc", "len"),
+    ("aac", "dpc", "prop", "len"),
+    ("aac", "dpc", "flank", "len"),
+    ("aac", "dpc", "prop", "flank", "len"),
+    ("dpc", "len"),
+    ("dpc", "prop", "len"),
+    ("dpc", "prop", "flank", "len"),
+    ("dpc", "flank", "len"),
 )
-# PROT held the slot FLANK now holds. Kept so the superseded phase-1 sweep
-# still renders, but out of the current grid: the matrix no longer produces
-# these runs, and blank rows for them would be noise.
-SUPERSEDED_COMBINATION_ORDER = (
-    ("aac", "protein"),
-    ("aac", "dpc", "protein"),
-    ("aac", "biological", "protein"),
-    ("aac", "dpc", "biological", "protein"),
-    ("dpc", "protein"),
-    ("dpc", "biological", "protein"),
-    ("biological", "protein"),
-    ("protein",),
+# Parts 2 to 5, in that order. Reported, never selected from.
+PROTEIN_GROUPS = ("protglobal", "protlen", "pos", "protid")
+PAPER_PATH_START = ("prop", "len")
+CONTRAST_BACKBONE = ("aac", "prop", "flank", "len")
+
+
+def _paper_path() -> tuple[tuple[str, ...], ...]:
+    rungs, rung = [], PAPER_PATH_START
+    for group in PROTEIN_GROUPS:
+        rung = rung + (group,)
+        rungs.append(rung)
+    return tuple(rungs)
+
+
+PART2_PAPER_PATH = _paper_path()
+PART3_ON_BACKBONE = tuple(CONTRAST_BACKBONE + (g,) for g in PROTEIN_GROUPS)
+PART4_ALONE = tuple((g,) for g in PROTEIN_GROUPS)
+PART5_WITHOUT_LEN = (("aac", "prop", "flank"),)
+CONTRAST_COMBINATION_ORDER = (
+    PART2_PAPER_PATH + PART3_ON_BACKBONE + PART4_ALONE + PART5_WITHOUT_LEN
 )
-ALL_COMBINATION_ORDER = FEATURE_COMBINATION_ORDER + SUPERSEDED_COMBINATION_ORDER
+# Rows whose first two rungs reproduce a published profile exactly, so the
+# table can say so instead of leaving the reader to spot it.
+PAPER_PATH_NOTES = {
+    tuple(sorted(PART2_PAPER_PATH[0])): " (= FS-2)",
+    tuple(sorted(PART2_PAPER_PATH[1])): " (= FS-1 less its duplicate column)",
+}
+# Group names earlier sweeps used. Kept only so a superseded summary still
+# prints; the matrix no longer produces any of them.
+_LEGACY_GROUPS = ("aac", "dpc", "biological", "flank", "protein")
+SUPERSEDED_COMBINATION_ORDER = tuple(
+    combination
+    for size in range(1, len(_LEGACY_GROUPS) + 1)
+    for combination in itertools.combinations(_LEGACY_GROUPS, size)
+    if combination not in FEATURE_COMBINATION_ORDER
+)
+ALL_COMBINATION_ORDER = (
+    FEATURE_COMBINATION_ORDER
+    + CONTRAST_COMBINATION_ORDER
+    + SUPERSEDED_COMBINATION_ORDER
+)
 # Only the FEATURE SET is taken from each comparison study; the classifier,
 # folds, tuning budget and imbalance handling are ours. Labelling these rows
 # with the original method names would misreport those studies, so they are
@@ -200,54 +236,75 @@ def _index_summaries(
     return by_key
 
 
-def _combinations_present(
-    summaries: dict[str, dict[str, Any]]
-) -> tuple[tuple[str, ...], ...]:
-    """Ablation combinations this sweep actually covers, in display order.
+def _group_label(combination: tuple[str, ...]) -> str:
+    return " + ".join(GROUP_LABELS[group] for group in combination)
 
-    ALL_COMBINATION_ORDER lists both the current FLANK groups and the
-    superseded PROT ones so either sweep renders. Filtering here keeps the
-    other half out of the table instead of emitting permanently blank rows.
+
+def full_row_plan() -> list[tuple[str, str, tuple[str, ...] | None]]:
+    """Every row the table can show, as (label, feature_set, groups).
+
+    Four arms in order: the power set the selection rule works over, the
+    planned contrasts, the reference sets rebuilt from our own groups, and the
+    reference sets exactly as published. Superseded group names follow the
+    power set so an earlier sweep still prints under its own labels.
+    """
+    plan: list[tuple[str, str, tuple[str, ...] | None]] = []
+    for combination in FEATURE_COMBINATION_ORDER:
+        plan.append((_group_label(combination), "proposed", combination))
+    for combination in SUPERSEDED_COMBINATION_ORDER:
+        plan.append((_group_label(combination), "proposed", combination))
+    for combination in CONTRAST_COMBINATION_ORDER:
+        note = PAPER_PATH_NOTES.get(tuple(sorted(combination)), "")
+        plan.append((_group_label(combination) + note, "kontras", combination))
+    for feature_set in PAPER_ORDER:
+        plan.append((PAPER_LABELS[feature_set], feature_set, None))
+    return plan
+
+
+def _rows_present(
+    summaries: dict[str, dict[str, Any]]
+) -> list[tuple[str, str, tuple[str, ...] | None]]:
+    """The plan restricted to rows this sweep actually covers.
+
+    A sweep that ran only part of the matrix, or an earlier sweep using group
+    names the matrix no longer produces, would otherwise contribute a block of
+    permanently blank rows.
     """
     seen = {
-        _combination_key(row.get("feature_groups", ""))
+        (
+            (row.get("feature_set") or "").strip(),
+            _combination_key(row.get("feature_groups", "")),
+        )
         for row in summaries.values()
     }
-    return tuple(
-        combination
-        for combination in ALL_COMBINATION_ORDER
-        if tuple(sorted(combination)) in seen
-    )
+    return [
+        entry
+        for entry in full_row_plan()
+        if (
+            entry[1],
+            None if entry[2] is None else tuple(sorted(entry[2])),
+        )
+        in seen
+    ]
 
 
 def _model_entries(
     by_key: dict[tuple[str, str, tuple[str, ...] | None], dict[str, Any]],
     model_type: str,
-    paper_order: tuple[str, ...],
-    combination_order: tuple[tuple[str, ...], ...] = FEATURE_COMBINATION_ORDER,
+    plan: list[tuple[str, str, tuple[str, ...] | None]] | None = None,
 ) -> list[tuple[str, dict[str, Any] | None]]:
-    """The rows one model contributes: the ablations, then the paper feature sets."""
+    """The rows one model contributes, resolved against the indexed summaries."""
+    if plan is None:
+        plan = full_row_plan()
     entries: list[tuple[str, dict[str, Any] | None]] = []
-    for combination in combination_order:
-        label = " + ".join(GROUP_LABELS[group] for group in combination)
-        entries.append(
-            (label, by_key.get((model_type, "proposed", tuple(sorted(combination)))))
+    for label, feature_set, combination in plan:
+        key = (
+            model_type,
+            feature_set,
+            None if combination is None else tuple(sorted(combination)),
         )
-    for feature_set in paper_order:
-        entries.append(
-            (PAPER_LABELS[feature_set], by_key.get((model_type, feature_set, None)))
-        )
+        entries.append((label, by_key.get(key)))
     return entries
-
-
-def _paper_sets_present(summaries: dict[str, dict[str, Any]]) -> tuple[str, ...]:
-    """Paper feature sets this sweep actually covers, failed runs included.
-
-    Keeps feature sets that were never swept (because their embedding assets
-    are absent) out of the table instead of emitting permanently blank rows.
-    """
-    seen = {(row.get("feature_set") or "").strip() for row in summaries.values()}
-    return tuple(name for name in PAPER_ORDER if name in seen)
 
 
 def build_internal_table(
@@ -262,13 +319,10 @@ def build_internal_table(
     a spreadsheet without losing which model a row belongs to.
     """
     by_key = _index_summaries(summaries)
-    paper_order = _paper_sets_present(summaries)
-    combination_order = _combinations_present(summaries)
+    plan = _rows_present(summaries)
     rows: list[list[str]] = []
     for model_type in model_order:
-        for note, row in _model_entries(
-            by_key, model_type, paper_order, combination_order
-        ):
+        for note, row in _model_entries(by_key, model_type, plan):
             cells = [MODEL_LABELS.get(model_type, model_type), note]
             if row is None:
                 cells.extend([""] * len(METRICS))
@@ -299,7 +353,7 @@ def build_table(
 
     rows: list[list[str]] = []
     for number, model_type in enumerate(model_order, start=1):
-        entries = _model_entries(by_key, model_type, PAPER_ORDER)
+        entries = _model_entries(by_key, model_type)
 
         for index, (note, row) in enumerate(entries):
             cells = [

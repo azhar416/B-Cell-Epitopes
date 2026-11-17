@@ -98,33 +98,128 @@ FEATURE_SETS = (
     "perbandingan_2",
     "perbandingan_3",
 )
+# Feature sets whose columns come from feature_groups rather than a fixed
+# profile. Only "proposed" enters the one-standard-error selection; the other
+# two are reported and never selected from.
+GROUPED_FEATURE_SETS = ("proposed", "kontras")
+# SVM was dropped from the sweep for computational budget: on 14,358 rows its
+# cost grows as n^2.3 and the calibration wrapper fits it four times per model
+# fit, which put phase 1 past Kaggle's 12 h session cap. CFG and model.py still
+# support it, and HYPERPARAMETER_TUNING_CANDIDATES still holds its grid, so it
+# can be restored by adding it back to this tuple.
 MODEL_TYPES = (
     "random_forest",
-    "svm",
     "logistic_regression",
     "extra_trees",
     "xgboost",
 )
-# "protein" was replaced by "flank" after the phase-1 sweep: protein-level
-# composition is constant within a protein, so under protein-grouped folds it
-# acts as a protein identifier rather than a feature. "flank" carries the
-# peptide's neighbourhood instead, which varies peptide by peptide.
-FEATURE_GROUPS = ("aac", "dpc", "flank", "biological")
-ALL_COMBINATIONS = tuple(
+# Every group the matrix can switch on, with the CFG flag that enables it.
+# The order here is canonical: it fixes the column order of every combination
+# and therefore every experiment_id.
+GROUP_SWITCHES = {
+    "aac": "USE_AAC_FEATURES",
+    "dpc": "USE_DPC_FEATURES",
+    "prop": "USE_PROP_FEATURES",
+    "flank": "USE_FLANK_FEATURES",
+    "len": "USE_LEN_FEATURES",
+    "protglobal": "USE_PROTGLOBAL_FEATURES",
+    "protlen": "USE_PROTLEN_FEATURES",
+    "pos": "USE_POS_FEATURES",
+    "protid": "USE_PROTID_FEATURES",
+}
+ALL_GROUPS = tuple(GROUP_SWITCHES)
+
+# Part 1 -- the only arm the one-standard-error rule selects from. All four
+# groups are computed from peptide_seq or from the residues immediately
+# flanking it, so each is usable on a protein never seen in training.
+FEATURE_GROUPS = ("aac", "dpc", "prop", "flank")
+# Peptide length is a property of the sampling window rather than a
+# representation of the peptide's content, and all three reference feature
+# sets include it. Holding it on in every run keeps the comparison matched and
+# keeps the smallest candidate at 5 columns instead of 1. Part 5 measures what
+# it contributes by running the backbone without it.
+ALWAYS_ON_GROUPS = ("len",)
+_POWER_SET = tuple(
     combination
     for size in range(1, len(FEATURE_GROUPS) + 1)
     for combination in itertools.combinations(FEATURE_GROUPS, size)
 )
-# The combinations that changed when PROT became FLANK. The other seven are
-# built from identical switches and carry identical experiment_ids, so a
-# phase-1 sweep made under the old matrix still covers them.
-FLANK_COMBINATIONS = tuple(c for c in ALL_COMBINATIONS if "flank" in c)
-UNCHANGED_COMBINATIONS = tuple(c for c in ALL_COMBINATIONS if "flank" not in c)
-# Cheapest two of the unchanged combinations. Rerunning them alongside a
-# flank sweep shows empirically whether the earlier sweep ran in this same
-# environment, which the earlier summaries cannot prove on their own because
-# they predate library-version recording.
-REPRODUCTION_CHECK_COMBINATIONS = (("aac",), ("aac", "biological"))
+
+# Computed from the whole protein, or from the row's place in the dataset, so
+# every peptide of a protein shares the value (measured intra-class
+# correlation 1.000 for protglobal, protlen and protid; 0.797 for pos). Under
+# protein-grouped folds they identify the protein rather than describe the
+# peptide, so they are reported and never selected from.
+PROTEIN_GROUPS = ("protglobal", "protlen", "pos", "protid")
+# Part 2 retraces the literature's own path. Starting from the legitimate half
+# of the reference sets, the first two rungs reproduce FS-2 and FS-1 exactly,
+# which makes those papers points on our ladder rather than external baselines.
+PAPER_PATH_START = ("prop", "len")
+# Part 3 and part 5 backbone. Fixed in advance, and deliberately without DPC:
+# a one-column contrast against 467 columns would measure nothing, while
+# against 67 it is detectable.
+CONTRAST_BACKBONE = ("aac", "prop", "flank", "len")
+# Cheapest two power-set combinations, rerun when a sweep is split across
+# sessions to show the halves came from the same environment.
+REPRODUCTION_CHECK_COMBINATIONS = (
+    ("prop", "len"),
+    ("aac", "len"),
+)
+
+
+def canonical(groups) -> tuple[str, ...]:
+    """Order groups canonically and reject unknown names."""
+    wanted = {str(group) for group in groups}
+    unknown = sorted(wanted.difference(ALL_GROUPS))
+    if unknown:
+        raise ValueError(f"Unsupported feature groups: {unknown}.")
+    if not wanted:
+        raise ValueError("At least one feature group must be selected.")
+    return tuple(group for group in ALL_GROUPS if group in wanted)
+
+
+# Part 1, with the always-on groups baked in so _configure_run needs no
+# special case: 15 combinations, 5 to 467 columns.
+ALL_COMBINATIONS = tuple(
+    canonical(combination + ALWAYS_ON_GROUPS) for combination in _POWER_SET
+)
+
+
+def _contrast_combinations() -> list[tuple[str, ...]]:
+    """Parts 2 to 5: reported, never selected from."""
+    combinations: list[tuple[str, ...]] = []
+    rung = PAPER_PATH_START                                   # part 2
+    for group in PROTEIN_GROUPS:
+        rung = rung + (group,)
+        combinations.append(canonical(rung))
+    for group in PROTEIN_GROUPS:                              # part 3
+        combinations.append(canonical(CONTRAST_BACKBONE + (group,)))
+    for group in PROTEIN_GROUPS:                              # part 4
+        combinations.append(canonical((group,)))
+    combinations.append(                                      # part 5
+        canonical(tuple(g for g in CONTRAST_BACKBONE if g not in ALWAYS_ON_GROUPS))
+    )
+    if len(set(combinations)) != len(combinations):
+        raise RuntimeError("Contrast combinations must be distinct.")
+    return combinations
+
+
+CONTRAST_COMBINATIONS = tuple(_contrast_combinations())
+
+# The first two rungs of part 2 reproduce published profiles column for
+# column, which makes those papers points on our own ladder rather than
+# external baselines, and checks the fixed-profile code path against the group
+# switches. FS-3 is absent on purpose: RFE kept subsets of PROP and
+# PROTGLOBAL rather than whole groups, so no union of groups reproduces it.
+PAPER_RECONSTRUCTIONS = {
+    "perbandingan_2": canonical(PAPER_PATH_START + ("protglobal",)),
+    "perbandingan_1": canonical(PAPER_PATH_START + ("protglobal", "protlen")),
+}
+if any(
+    combination not in CONTRAST_COMBINATIONS
+    for combination in PAPER_RECONSTRUCTIONS.values()
+):
+    raise RuntimeError("Every paper reconstruction must be a rung of part 2.")
 
 
 @dataclass(frozen=True)
@@ -153,70 +248,81 @@ def build_experiment_matrix(
     feature_groups: tuple[str, ...] | None = None,
     feature_combinations: Iterable[Iterable[str]] | None = None,
     include_comparisons: bool = True,
+    include_contrasts: bool | None = None,
+    contrast_groups: Iterable[str] | None = None,
 ) -> list[ExperimentSpec]:
-    """Build all proposed ablations and fixed-profile comparison runs.
+    """Build the proposed power set, the planned contrasts, and the baselines.
+
+    A full sweep is 31 configurations per model:
+      15  proposed   part 1: power set over FEATURE_GROUPS with ALWAYS_ON_GROUPS
+                     held on -- the only arm the selection rule sees
+      13  kontras    part 2: the literature's path, cumulative from
+                             PAPER_PATH_START (its first two rungs are FS-2
+                             and FS-1 exactly)
+                     part 3: each PROTEIN_GROUP on CONTRAST_BACKBONE
+                     part 4: each PROTEIN_GROUP alone
+                     part 5: CONTRAST_BACKBONE without the always-on groups
+       3  perbandingan  part 6: FS-1, FS-2, FS-3 exactly as published
 
     Passing feature_groups restricts the proposed arm to that single frozen
     combination, which is what phase 2 runs once a configuration is selected.
-    Passing feature_combinations restricts it to several, which is how a
-    partial sweep reruns only the combinations that changed.
-    Set include_comparisons=False to leave out the paper feature sets when an
-    earlier sweep already covered them.
+    Passing feature_combinations restricts it to several, and contrast_groups
+    restricts the contrast arm; together they are how a sweep is split across
+    sessions. Either proposed-arm restriction switches the contrast and
+    reconstruction arms off unless they are asked for explicitly, because they
+    belong to a full sweep rather than a partial one.
     """
     if feature_groups is not None and feature_combinations is not None:
         raise ValueError(
             "Pass feature_groups (one combination) or feature_combinations "
             "(several), not both."
         )
+    restricted = feature_groups is not None or feature_combinations is not None
+    if include_contrasts is None:
+        include_contrasts = not restricted
+
     selected_models = tuple(model_types) if model_types else MODEL_TYPES
     unknown_models = [model for model in selected_models if model not in MODEL_TYPES]
     if unknown_models:
         raise ValueError(f"Unsupported model types: {sorted(unknown_models)}.")
 
-    specs: list[ExperimentSpec] = []
     if feature_combinations is not None:
-        requested = [tuple(combination) for combination in feature_combinations]
+        requested = [canonical(combination) for combination in feature_combinations]
         if not requested:
             raise ValueError("At least one feature combination must be selected.")
-        unknown_groups = sorted(
-            {
-                group
-                for combination in requested
-                for group in combination
-                if group not in FEATURE_GROUPS
-            }
-        )
-        if unknown_groups:
-            raise ValueError(f"Unsupported feature groups: {unknown_groups}.")
-        # Canonical order keeps every experiment_id identical to a full sweep.
-        proposed_combinations = []
-        for combination in requested:
-            canonical = tuple(
-                group for group in FEATURE_GROUPS if group in set(combination)
-            )
-            if not canonical:
-                raise ValueError("A feature combination must not be empty.")
-            if canonical not in proposed_combinations:
-                proposed_combinations.append(canonical)
+        proposed_combinations = list(dict.fromkeys(requested))
     elif feature_groups is None:
         proposed_combinations = list(ALL_COMBINATIONS)
     else:
-        unknown_groups = [
-            group for group in feature_groups if group not in FEATURE_GROUPS
-        ]
-        if unknown_groups:
-            raise ValueError(f"Unsupported feature groups: {sorted(unknown_groups)}.")
-        if not feature_groups:
-            raise ValueError("At least one feature group must be selected.")
-        # Canonical order keeps the experiment_id identical to the phase-1 run.
-        proposed_combinations = [
-            tuple(group for group in FEATURE_GROUPS if group in set(feature_groups))
-        ]
+        proposed_combinations = [canonical(feature_groups)]
 
+    contrast_combinations: list[tuple[str, ...]] = []
+    if include_contrasts:
+        if contrast_groups is None:
+            contrast_combinations = list(CONTRAST_COMBINATIONS)
+        else:
+            # A session may take a subset, keyed by the protein group each
+            # contrast is about; part 5 has none, so it is named explicitly.
+            wanted = set(contrast_groups)
+            unknown = sorted(wanted.difference(PROTEIN_GROUPS) - {"len"})
+            if unknown:
+                raise ValueError(f"Unsupported contrast groups: {unknown}.")
+            contrast_combinations = [
+                combination
+                for combination in CONTRAST_COMBINATIONS
+                if (set(combination) & set(PROTEIN_GROUPS) & wanted)
+                or ("len" in wanted and not set(combination) & set(PROTEIN_GROUPS))
+            ]
+
+    specs: list[ExperimentSpec] = []
     for model_type in selected_models:
         specs.extend(
             ExperimentSpec("proposed", model_type, combination)
             for combination in proposed_combinations
+        )
+        specs.extend(
+            ExperimentSpec("kontras", model_type, combination)
+            for combination in contrast_combinations
         )
         if include_comparisons:
             specs.extend(
@@ -225,8 +331,12 @@ def build_experiment_matrix(
                 if feature_set != "proposed"
             )
 
-    comparison_count = (len(FEATURE_SETS) - 1) if include_comparisons else 0
-    expected = len(selected_models) * (len(proposed_combinations) + comparison_count)
+    per_model = (
+        len(proposed_combinations)
+        + len(contrast_combinations)
+        + ((len(FEATURE_SETS) - 1) if include_comparisons else 0)
+    )
+    expected = len(selected_models) * per_model
     if len(specs) != expected:
         raise RuntimeError(
             f"Expected {expected} experiment configurations; got {len(specs)}."
@@ -246,14 +356,17 @@ def _configure_run(base_config: CFG, spec: ExperimentSpec, output_root: Path) ->
         / spec.model_type
         / spec.feature_group_label
     )
-    if spec.feature_set == "proposed":
+    if spec.feature_set in GROUPED_FEATURE_SETS:
         assert spec.feature_groups is not None
         active_groups = set(spec.feature_groups)
-        config.USE_AAC_FEATURES = "aac" in active_groups
-        config.USE_DPC_FEATURES = "dpc" in active_groups
-        config.USE_PROTEIN_FEATURES = "protein" in active_groups
-        config.USE_BIOLOGICAL_FEATURES = "biological" in active_groups
-        config.USE_FLANK_FEATURES = "flank" in active_groups
+        for group, switch in GROUP_SWITCHES.items():
+            setattr(config, switch, group in active_groups)
+        # The two historical blocks are never part of this matrix. Setting them
+        # explicitly stops a non-default base config from leaking a protein
+        # identifier into a run whose groups do not name one.
+        config.USE_PROTEIN_FEATURES = False
+        config.USE_BIOLOGICAL_FEATURES = False
+        config.USE_PEPTIDE_FEATURES = False
     return config
 
 
@@ -392,6 +505,8 @@ def run_experiment_matrix(
     feature_groups: tuple[str, ...] | None = None,
     feature_combinations: Iterable[Iterable[str]] | None = None,
     include_comparisons: bool = True,
+    include_contrasts: bool | None = None,
+    contrast_groups: Iterable[str] | None = None,
     tuning_metric: str | None = None,
     resume: bool = False,
 ) -> list[dict[str, Any]]:
@@ -418,6 +533,8 @@ def run_experiment_matrix(
         feature_groups,
         feature_combinations=feature_combinations,
         include_comparisons=include_comparisons,
+        include_contrasts=include_contrasts,
+        contrast_groups=contrast_groups,
     )
     _preflight(base_config, specs)
     # Warn rather than refuse: a deliberate robustness run in another

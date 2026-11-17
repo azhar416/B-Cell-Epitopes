@@ -7,16 +7,26 @@ import pandas as pd
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
 RARE_AMINO_ACIDS = frozenset("BUZO")
-DESCRIPTOR_COLUMNS = (
+# Peptide-level propensity scales: these vary between peptides of one protein.
+PROP_COLUMNS = (
     "chou_fasman",
     "emini",
     "kolaskar_tongaonkar",
     "parker",
+)
+# Computed from protein_seq, so every peptide of a protein carries the same
+# value (measured intra-class correlation 1.000). Under protein-grouped folds
+# they identify the protein instead of describing the peptide, which is why
+# they form their own group rather than sitting inside the propensity block.
+PROTGLOBAL_COLUMNS = (
     "isoelectric_point",
     "aromaticity",
     "hydrophobicity",
     "stability",
 )
+# The historical "biological" block, kept so earlier runs stay reproducible.
+DESCRIPTOR_COLUMNS = PROP_COLUMNS + PROTGLOBAL_COLUMNS
+AAC_COLUMNS = tuple(f"aac_{amino_acid}" for amino_acid in AMINO_ACIDS)
 PERBANDINGAN_3_DESCRIPTOR_COLUMNS = (
     "hydrophobicity",
     "isoelectric_point",
@@ -78,13 +88,19 @@ def build_feature_frame(
     use_flank_features: bool = False,
     flank_window: int = FLANK_WINDOW_DEFAULT,
     flank_split_sides: bool = True,
+    use_len_features: bool = False,
+    use_prop_features: bool = False,
+    use_protglobal_features: bool = False,
+    use_protlen_features: bool = False,
+    use_pos_features: bool = False,
+    use_protid_features: bool = False,
 ) -> pd.DataFrame:
     """Build one of the paper-based comparison profiles or proposed features."""
     if not isinstance(feature_set, str):
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
             "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-            "or 'proposed'."
+            "'kontras', or 'proposed'."
         )
     feature_set = feature_set.strip().lower().replace(" ", "_")
     if feature_set not in {
@@ -93,12 +109,13 @@ def build_feature_frame(
         "perbandingan_3",
         "perbandingan_4",
         "perbandingan_5",
+        "kontras",
         "proposed",
     }:
         raise ValueError(
             "feature_set must be 'perbandingan_1', 'perbandingan_2', "
             "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-            "or 'proposed'."
+            "'kontras', or 'proposed'."
         )
 
     if feature_set == "perbandingan_1":
@@ -304,9 +321,20 @@ def build_feature_frame(
         ("use_biological_features", use_biological_features),
         ("use_flank_features", use_flank_features),
         ("flank_split_sides", flank_split_sides),
+        ("use_len_features", use_len_features),
+        ("use_prop_features", use_prop_features),
+        ("use_protglobal_features", use_protglobal_features),
+        ("use_protlen_features", use_protlen_features),
+        ("use_pos_features", use_pos_features),
+        ("use_protid_features", use_protid_features),
     ):
         if not isinstance(enabled, bool):
             raise ValueError(f"{name} must be a boolean.")
+    # The historical block is exactly the two level-specific groups, in the
+    # same column order, so earlier runs reproduce bit for bit.
+    if use_biological_features:
+        use_prop_features = True
+        use_protglobal_features = True
     if not isinstance(flank_window, int) or isinstance(flank_window, bool):
         raise ValueError("flank_window must be an integer.")
     if flank_window < 1:
@@ -337,8 +365,13 @@ def build_feature_frame(
             use_aac_features,
             use_dpc_features,
             use_protein_features,
-            use_biological_features,
             use_flank_features,
+            use_len_features,
+            use_prop_features,
+            use_protglobal_features,
+            use_protlen_features,
+            use_pos_features,
+            use_protid_features,
         )
     ):
         raise ValueError("At least one feature group must be enabled.")
@@ -347,6 +380,7 @@ def build_feature_frame(
         or use_dpc_features
         or use_protein_features
         or use_flank_features
+        or use_len_features
     )
     if needs_sequence and sequence_column not in dataframe:
         raise ValueError(f"DataFrame is missing sequence column {sequence_column!r}.")
@@ -361,11 +395,14 @@ def build_feature_frame(
     )
     features: dict[str, list[float]] = {}
     if use_aac_features:
-        features.update(
-            {f"aac_{amino_acid}": [] for amino_acid in AMINO_ACIDS}
-        )
-        features["aac_X"] = []
-        features["sequence_length"] = []
+        # 20 residue frequencies only. aac_X is absent because no ambiguous
+        # residue survives cleaning in either dataset, and peptide length is
+        # its own group rather than a passenger inside composition.
+        features.update({column: [] for column in AAC_COLUMNS})
+    if use_len_features:
+        # Named as the reference profiles name it, so a reconstruction of
+        # FS-1/FS-2 from our own groups is identical column for column.
+        features["peptide_length"] = []
 
     dipeptides = [first + second for first in AMINO_ACIDS for second in AMINO_ACIDS]
     if use_dpc_features:
@@ -374,7 +411,13 @@ def build_feature_frame(
     protein_sequences = None
     start_positions = None
     end_positions = None
-    if use_protein_features or use_flank_features:
+    needs_protein_context = (
+        use_protein_features
+        or use_flank_features
+        or use_protlen_features
+        or use_pos_features
+    )
+    if needs_protein_context:
         required_columns = {"protein_seq", "start_position", "end_position"}
         missing_columns = required_columns.difference(dataframe.columns)
         if missing_columns:
@@ -418,14 +461,19 @@ def build_feature_frame(
             prefix = f"flank_{side}_aac_" if side else "flank_aac_"
             for amino_acid in AMINO_ACIDS:
                 features[f"{prefix}{amino_acid}"] = []
-            features[f"{prefix}X"] = []
         # How many residues each side actually supplied. Without these a
         # truncated flank is indistinguishable from a balanced one, because
         # both are rates and an absent flank is an all-zero vector.
         features["flank_left_available"] = []
         features["flank_right_available"] = []
 
-    if use_aac_features or use_dpc_features:
+    if use_protlen_features:
+        features["protein_length"] = []
+    if use_pos_features:
+        features["start_position"] = []
+        features["end_position"] = []
+
+    if use_aac_features or use_dpc_features or use_len_features:
         for sequence in sequences:
             residue_counts = Counter(sequence)
             sequence_length = len(sequence)
@@ -434,8 +482,8 @@ def build_feature_frame(
                     features[f"aac_{amino_acid}"].append(
                         residue_counts[amino_acid] / sequence_length
                     )
-                features["aac_X"].append(residue_counts["X"] / sequence_length)
-                features["sequence_length"].append(float(sequence_length))
+            if use_len_features:
+                features["peptide_length"].append(float(sequence_length))
 
             if use_dpc_features:
                 pair_counts = Counter(
@@ -492,20 +540,50 @@ def build_feature_frame(
                     features[f"{prefix}{amino_acid}"].append(
                         residue_counts[amino_acid] / denominator
                     )
-                features[f"{prefix}X"].append(residue_counts["X"] / denominator)
             features["flank_left_available"].append(float(len(left)))
             features["flank_right_available"].append(float(len(right)))
 
+    if use_protlen_features:
+        for protein_sequence in protein_sequences:
+            features["protein_length"].append(float(len(protein_sequence)))
+    if use_pos_features:
+        for index in range(len(dataframe)):
+            features["start_position"].append(float(start_positions.iloc[index]))
+            features["end_position"].append(float(end_positions.iloc[index]))
+
     result = pd.DataFrame(features, index=dataframe.index)
-    if use_biological_features:
-        missing_descriptors = set(DESCRIPTOR_COLUMNS).difference(
-            dataframe.columns
-        )
+    # PROP before PROTGLOBAL, so enabling both reproduces the historical
+    # DESCRIPTOR_COLUMNS order exactly.
+    for enabled, columns, label in (
+        (use_prop_features, PROP_COLUMNS, "Propensity"),
+        (use_protglobal_features, PROTGLOBAL_COLUMNS, "Protein-global"),
+    ):
+        if not enabled:
+            continue
+        missing_descriptors = set(columns).difference(dataframe.columns)
         if missing_descriptors:
             raise ValueError(
-                "Biological features require descriptor columns: "
+                f"{label} features require descriptor columns: "
                 f"{sorted(missing_descriptors)}."
             )
-        for column in DESCRIPTOR_COLUMNS:
+        for column in columns:
             result[column] = pd.to_numeric(dataframe[column], errors="coerce")
+
+    if use_protid_features:
+        if "parent_protein_id" not in dataframe:
+            raise ValueError(
+                "protid features require a parent_protein_id column."
+            )
+        protein_ids = dataframe["parent_protein_id"].astype(str)
+        mapping = parent_protein_id_mapping
+        if mapping is None:
+            mapping = {
+                protein_id: index
+                for index, protein_id in enumerate(sorted(protein_ids.unique()))
+            }
+        # Unseen proteins collapse to -1, exactly as the perbandingan_3
+        # profile does. On the SARS set that is every single row.
+        result["parent_protein_id"] = [
+            mapping.get(protein_id, -1) for protein_id in protein_ids
+        ]
     return result

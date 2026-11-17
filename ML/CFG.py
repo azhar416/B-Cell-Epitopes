@@ -27,9 +27,26 @@ class CFG:
     # part of the experiment matrix.
     USE_PROTEIN_FEATURES: bool = False
     USE_BIOLOGICAL_FEATURES: bool = True
+    # --- the power-set groups: all peptide-local -----------------------------
     # Composition of the residues flanking the peptide in its parent protein.
     # Peptide-local, unlike USE_PROTEIN_FEATURES.
     USE_FLANK_FEATURES: bool = False
+    # Peptide length. Its own group because it is not composition, every
+    # reference feature set uses it, and on its own it reaches ROC-AUC 0.575.
+    USE_LEN_FEATURES: bool = False
+    # The four peptide-level propensity scales (Chou-Fasman, Emini,
+    # Kolaskar-Tongaonkar, Parker).
+    USE_PROP_FEATURES: bool = False
+
+    # --- contrast groups: reported, never selected ---------------------------
+    # Each of these is constant within a protein, or nearly so. They are run as
+    # planned contrasts to measure what protein-level information buys under
+    # protein-grouped folds, and are kept out of the selection space so the
+    # frozen configuration cannot contain one.
+    USE_PROTGLOBAL_FEATURES: bool = False
+    USE_PROTLEN_FEATURES: bool = False
+    USE_POS_FEATURES: bool = False
+    USE_PROTID_FEATURES: bool = False
     FLANK_WINDOW: int = FLANK_WINDOW_DEFAULT
     # Left and right kept apart: composition inside and beside an epitope
     # correlates with the label in opposite directions for several residues,
@@ -165,7 +182,7 @@ class CFG:
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
                 "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-                "or 'proposed'."
+                "'kontras', or 'proposed'."
             )
         self.FEATURE_SET = self.FEATURE_SET.strip().lower().replace(" ", "_")
         if self.FEATURE_SET not in {
@@ -174,12 +191,13 @@ class CFG:
             "perbandingan_3",
             "perbandingan_4",
             "perbandingan_5",
+            "kontras",
             "proposed",
         }:
             raise ValueError(
                 "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
                 "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-                "or 'proposed'."
+                "'kontras', or 'proposed'."
             )
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
             raise ValueError("DATASET_NAME must be either 'bcell' or 'sars'.")
@@ -219,6 +237,12 @@ class CFG:
             "USE_BIOLOGICAL_FEATURES",
             "USE_FLANK_FEATURES",
             "FLANK_SPLIT_SIDES",
+            "USE_LEN_FEATURES",
+            "USE_PROP_FEATURES",
+            "USE_PROTGLOBAL_FEATURES",
+            "USE_PROTLEN_FEATURES",
+            "USE_POS_FEATURES",
+            "USE_PROTID_FEATURES",
         ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean.")
@@ -239,13 +263,21 @@ class CFG:
                 "PEPTIDE_FEATURE_TYPE must be 'aac' or 'aac_dipeptide'."
             )
         self.PEPTIDE_FEATURE_TYPE = self.PEPTIDE_FEATURE_TYPE.lower()
-        if self.FEATURE_SET == "proposed" and not any(
+        # kontras is driven by the same group switches as proposed, so it
+        # carries the same requirement.
+        if self.FEATURE_SET in {"proposed", "kontras"} and not any(
             (
                 self.EFFECTIVE_AAC_FEATURES,
                 self.EFFECTIVE_DPC_FEATURES,
                 self.USE_PROTEIN_FEATURES,
                 self.USE_BIOLOGICAL_FEATURES,
                 self.USE_FLANK_FEATURES,
+                self.USE_LEN_FEATURES,
+                self.USE_PROP_FEATURES,
+                self.USE_PROTGLOBAL_FEATURES,
+                self.USE_PROTLEN_FEATURES,
+                self.USE_POS_FEATURES,
+                self.USE_PROTID_FEATURES,
             )
         ):
             raise ValueError("At least one feature group must be enabled.")
