@@ -9,6 +9,8 @@ from joblib import load
 from ML.pre_dataset import (
     DESCRIPTOR_COLUMNS,
     FLANK_WINDOW_DEFAULT,
+    PROP_COLUMNS,
+    PROTGLOBAL_COLUMNS,
     PERBANDINGAN_3_DESCRIPTOR_COLUMNS,
     build_feature_frame,
     get_bert_cls_columns,
@@ -73,6 +75,37 @@ def predict_peptides(
             any(name.startswith("flank_left_aac_") for name in feature_names),
         )
     )
+    # Groups split out of the old aac and biological blocks. The fallbacks read
+    # the saved feature names so a bundle written before these flags existed
+    # still rebuilds the right columns, rather than silently handing the model
+    # a frame where they are absent and imputed.
+    use_len_features = bool(
+        bundle.get("use_len_features", "peptide_length" in feature_names)
+    )
+    use_prop_features = bool(
+        bundle.get(
+            "use_prop_features",
+            any(name in PROP_COLUMNS for name in feature_names),
+        )
+    )
+    use_protglobal_features = bool(
+        bundle.get(
+            "use_protglobal_features",
+            any(name in PROTGLOBAL_COLUMNS for name in feature_names),
+        )
+    )
+    use_protlen_features = bool(
+        bundle.get("use_protlen_features", "protein_length" in feature_names)
+    )
+    use_pos_features = bool(
+        bundle.get(
+            "use_pos_features",
+            {"start_position", "end_position"}.issubset(feature_names),
+        )
+    )
+    use_protid_features = bool(
+        bundle.get("use_protid_features", "parent_protein_id" in feature_names)
+    )
     if feature_profile in {
         "perbandingan_1",
         "perbandingan_2",
@@ -82,6 +115,12 @@ def predict_peptides(
         use_protein_features = False
         use_biological_features = False
         use_flank_features = False
+        use_len_features = False
+        use_prop_features = False
+        use_protglobal_features = False
+        use_protlen_features = False
+        use_pos_features = False
+        use_protid_features = False
     peptide_feature_type = bundle.get(
         "peptide_feature_type",
         legacy_feature_set
@@ -89,12 +128,20 @@ def predict_peptides(
         else "aac",
     )
     use_aac_features = bool(
-        bundle.get("use_aac_features", use_peptide_features)
+        bundle.get(
+            "use_aac_features",
+            use_peptide_features
+            or any(
+                name.startswith("aac_") and not name.startswith("aac_dipeptide")
+                for name in feature_names
+            ),
+        )
     )
     use_dpc_features = bool(
         bundle.get(
             "use_dpc_features",
-            use_peptide_features and peptide_feature_type == "aac_dipeptide",
+            (use_peptide_features and peptide_feature_type == "aac_dipeptide")
+            or any(name.startswith("dpc_") for name in feature_names),
         )
     )
     if feature_profile in {
@@ -218,20 +265,32 @@ def predict_peptides(
                 "prottrans_embedding_data is missing a requested peptide."
             )
         input_frame = input_frame.drop(columns="_input_order").reset_index(drop=True)
+    # The descriptor columns are read from the caller rather than computed, so
+    # whichever of the three blocks the bundle asks for has to be copied in
+    # before the features are built. Only the columns that block needs are
+    # required, so a prop-only model does not demand the protein-level four.
+    needed_descriptors: tuple[str, ...] = ()
     if use_biological_features:
+        needed_descriptors += DESCRIPTOR_COLUMNS
+    if use_prop_features:
+        needed_descriptors += PROP_COLUMNS
+    if use_protglobal_features:
+        needed_descriptors += PROTGLOBAL_COLUMNS
+    needed_descriptors = tuple(dict.fromkeys(needed_descriptors))
+    if needed_descriptors:
         if descriptor_data is None:
             raise ValueError(
                 "This model uses precomputed physicochemical descriptors. "
-                f"Pass descriptor_data containing: {list(DESCRIPTOR_COLUMNS)}."
+                f"Pass descriptor_data containing: {list(needed_descriptors)}."
             )
-        missing = set(DESCRIPTOR_COLUMNS).difference(descriptor_data.columns)
+        missing = set(needed_descriptors).difference(descriptor_data.columns)
         if missing:
             raise ValueError(
                 f"descriptor_data is missing required columns: {sorted(missing)}."
             )
         if len(descriptor_data) != len(input_frame):
             raise ValueError("descriptor_data must have one row per peptide sequence.")
-        for column in DESCRIPTOR_COLUMNS:
+        for column in needed_descriptors:
             input_frame[column] = descriptor_data[column].to_numpy()
 
     if feature_profile == "perbandingan_1":
@@ -355,7 +414,28 @@ def predict_peptides(
             input_frame[column] = protein_context_data[column].to_numpy()
         for column in PERBANDINGAN_3_DESCRIPTOR_COLUMNS:
             input_frame[column] = descriptor_data[column].to_numpy()
-    elif use_protein_features or use_flank_features:
+    if use_protid_features:
+        if protein_context_data is None or (
+            "parent_protein_id" not in protein_context_data.columns
+        ):
+            raise ValueError(
+                "This model uses the protein identifier. Pass "
+                "protein_context_data containing a parent_protein_id column."
+            )
+        if len(protein_context_data) != len(input_frame):
+            raise ValueError(
+                "protein_context_data must have one row per peptide sequence."
+            )
+        input_frame["parent_protein_id"] = (
+            protein_context_data["parent_protein_id"].to_numpy()
+        )
+
+    if (
+        use_protein_features
+        or use_flank_features
+        or use_protlen_features
+        or use_pos_features
+    ):
         required_columns = {"protein_seq", "start_position", "end_position"}
         if protein_context_data is None:
             raise ValueError(
@@ -389,6 +469,12 @@ def predict_peptides(
         use_flank_features=use_flank_features,
         flank_window=flank_window,
         flank_split_sides=flank_split_sides,
+        use_len_features=use_len_features,
+        use_prop_features=use_prop_features,
+        use_protglobal_features=use_protglobal_features,
+        use_protlen_features=use_protlen_features,
+        use_pos_features=use_pos_features,
+        use_protid_features=use_protid_features,
     ).reindex(columns=feature_names)
     probabilities = bundle["model"].predict_proba(feature_frame)[:, 1]
     threshold = float(bundle["prediction_threshold"])

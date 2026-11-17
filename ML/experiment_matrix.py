@@ -670,7 +670,10 @@ def main() -> None:
     parser.add_argument(
         "--feature-groups",
         nargs="+",
-        choices=FEATURE_GROUPS,
+        # Includes ALWAYS_ON_GROUPS: a frozen combination names every group it
+        # contains, and select_configuration prints exactly that list, so the
+        # command it hands the user has to be accepted here.
+        choices=FEATURE_GROUPS + ALWAYS_ON_GROUPS,
         default=None,
         help=(
             "Run the proposed arm with only this frozen feature combination "

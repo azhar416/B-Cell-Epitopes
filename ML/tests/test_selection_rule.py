@@ -9,7 +9,11 @@ from tempfile import TemporaryDirectory
 
 from ML.experiment_matrix import build_experiment_matrix
 from ML.pre_dataset import build_feature_frame
-from ML.experiment_matrix import GROUP_SWITCHES
+from ML.experiment_matrix import (
+    ALL_COMBINATIONS,
+    ALWAYS_ON_GROUPS,
+    GROUP_SWITCHES,
+)
 from ML.select_configuration import (
     GROUP_FEATURE_COUNTS,
     combination_label,
@@ -437,6 +441,51 @@ class FrozenCombinationRunTests(unittest.TestCase):
     def test_unknown_feature_group_is_rejected(self):
         with self.assertRaises(ValueError):
             build_experiment_matrix(feature_groups=("aac", "nonsense"))
+
+
+class PrintedPhaseTwoCommandTests(unittest.TestCase):
+    """The command select_configuration hands the user must actually run.
+
+    It names every group of the frozen combination, including the always-on
+    ones, so the matrix CLI has to accept all of them. When ALWAYS_ON_GROUPS
+    was introduced the CLI still only offered FEATURE_GROUPS, and the printed
+    command was rejected with "invalid choice: 'len'".
+    """
+
+    def _cli_choices(self):
+        import argparse
+        from unittest.mock import patch
+
+        import ML.experiment_matrix as matrix
+
+        captured = {}
+        real_add = argparse.ArgumentParser.add_argument
+
+        def spy(self, *args, **kwargs):
+            if "--feature-groups" in args:
+                captured["choices"] = tuple(kwargs.get("choices") or ())
+            return real_add(self, *args, **kwargs)
+
+        with patch.object(argparse.ArgumentParser, "add_argument", spy):
+            with patch.object(matrix, "run_experiment_matrix"):
+                with patch("sys.argv", ["ML.experiment_matrix", "--help"]):
+                    with redirect_stdout(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            matrix.main()
+        return captured["choices"]
+
+    def test_cli_accepts_every_group_a_frozen_combination_can_name(self):
+        choices = self._cli_choices()
+        for combination in ALL_COMBINATIONS:
+            for group in combination:
+                with self.subTest(group=group):
+                    self.assertIn(group, choices)
+
+    def test_always_on_groups_are_offered_by_the_cli(self):
+        choices = self._cli_choices()
+        for group in ALWAYS_ON_GROUPS:
+            with self.subTest(group=group):
+                self.assertIn(group, choices)
 
 
 if __name__ == "__main__":
