@@ -435,21 +435,59 @@ class SummaryTableTests(unittest.TestCase):
             writer.writerows(rows)
         return path
 
+    def _summary_row(self, model, feature_set, feature_groups, status="success"):
+        return {
+            "experiment_id": f"{feature_set}__{model}__{feature_groups}",
+            "status": status,
+            "model_type": model,
+            "feature_set": feature_set,
+            "feature_groups": feature_groups,
+            "bcell_oof_roc_auc": "0.6100",
+            "bcell_oof_std_roc_auc": "0.0300",
+        }
+
     def test_table_has_one_block_per_model_in_display_order(self):
-        rows = build_table({}, model_order=("random_forest", "xgboost"))
+        """Blocks follow model_order, and each block holds the same rows.
 
-        expected = len(full_row_plan())
-        self.assertEqual(len(rows), 2 * expected)
+        The row set comes from what the summary covers, so this builds a
+        summary with the same two configurations under both models.
+        """
+        summaries = {
+            f"{model}-{index}": self._summary_row(model, "proposed", groups)
+            for model in ("random_forest", "xgboost")
+            for index, groups in enumerate(("aac,len", "prop,len"))
+        }
+
+        rows = build_table(summaries, model_order=("random_forest", "xgboost"))
+
+        self.assertEqual(len(rows), 4)
         self.assertEqual(rows[0][1], "RF")
-        self.assertEqual(rows[expected][1], "XGBOOST")
+        self.assertEqual(rows[2][1], "XGBOOST")
+        self.assertEqual([row[2] for row in rows[:2]], [row[2] for row in rows[2:]])
+
+    def test_an_empty_summary_produces_no_rows(self):
+        """Nothing measured means nothing to print, not a block of blanks.
+
+        full_row_plan names every row the table *can* show, including the
+        superseded BIO/PROT combinations kept so an old summary still prints
+        under its own labels. Rendering all of them unconditionally put 31
+        permanently blank rows per model into the published table.
+        """
+        self.assertEqual(build_table({}, model_order=("random_forest",)), [])
+
+    def test_a_failed_run_keeps_its_row_but_reports_no_metrics(self):
+        summaries = {
+            "a": self._summary_row(
+                "random_forest", "proposed", "aac,len", status="failed"
+            )
+        }
+
+        rows = build_table(summaries, model_order=("random_forest",))
+
+        self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][2], "AAC + LEN")
-        self.assertEqual(rows[expected - 1][2], "FS-5 (BLMPred 2026)")
-
-    def test_missing_runs_are_marked_false_with_empty_metrics(self):
-        rows = build_table({}, model_order=("random_forest",))
-
-        self.assertTrue(all(row[10] == "FALSE" for row in rows))
-        self.assertTrue(all(row[3] == "" for row in rows))
+        self.assertEqual(rows[0][3], "")
+        self.assertEqual(rows[0][10], "FALSE")
 
     def test_internal_mean_and_std_are_combined(self):
         summaries = {
@@ -485,10 +523,11 @@ class SummaryTableTests(unittest.TestCase):
         }
 
         rows = build_table(summaries, model_order=("svm",))
-        plan = full_row_plan()
-        paper_row = rows[
-            next(i for i, entry in enumerate(plan) if entry[1] == "perbandingan_1")
-        ]
+        # Resolved by label: the row's position depends on what the summary
+        # covers, not on its index in full_row_plan.
+        paper_row = next(
+            row for row in rows if row[2] == "FS-1 (Cihan et al. 2022)"
+        )
 
         self.assertEqual(paper_row[2], "FS-1 (Cihan et al. 2022)")
         self.assertEqual(paper_row[3], "0.6100 ± 0.0300")

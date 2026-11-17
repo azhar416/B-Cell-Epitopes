@@ -6,10 +6,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ML.summary_table import (
+    EXTERNAL_PREFIXES,
     FEATURE_COMBINATION_ORDER,
     SUPERSEDED_COMBINATION_ORDER,
     METRICS,
     build_internal_table,
+    build_table,
     internal_header,
     read_summaries,
     render_rows_tsv,
@@ -205,3 +207,81 @@ class SupersededSweepTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicationTableTests(unittest.TestCase):
+    """build_table feeds the manuscript, so its row set has to be restricted.
+
+    It used to call _model_entries without a plan, which falls back to
+    full_row_plan(). That plan deliberately names the superseded BIO/PROT
+    combinations so an old summary still prints under its own labels, so the
+    published table gained 31 permanently blank rows per model -- 124 in all.
+    """
+
+    def _phase2_run(self, model, feature_set, feature_groups, external=0.55):
+        row = _run(model, feature_set, feature_groups)
+        for metric, _ in METRICS:
+            row[f"{EXTERNAL_PREFIXES['selected']}_{metric}"] = f"{external:.6f}"
+        return row
+
+    def _rows_for(self, summaries):
+        return build_table(summaries, model_order=("random_forest",))
+
+    def test_a_phase2_sweep_shows_only_the_configurations_it_ran(self):
+        frozen = ("prop", "len")
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [self._phase2_run("random_forest", "proposed", frozen)]
+                + [
+                    self._phase2_run("random_forest", paper, ())
+                    for paper in ("perbandingan_1", "perbandingan_2", "perbandingan_3")
+                ],
+            )
+            rows = self._rows_for(read_summaries([path]))
+        notes = [row[2] for row in rows]
+        self.assertEqual(len(rows), 4, notes)
+        self.assertNotIn("BIO", " ".join(notes))
+        self.assertNotIn("PROT", " ".join(notes))
+
+    def test_no_superseded_combination_is_ever_printed_blank(self):
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [self._phase2_run("random_forest", "proposed", ("prop", "len"))],
+            )
+            rows = self._rows_for(read_summaries([path]))
+        superseded = {
+            " + ".join(group.upper() for group in combination)
+            for combination in SUPERSEDED_COMBINATION_ORDER
+        }
+        printed = {row[2] for row in rows}
+        self.assertEqual(printed & superseded, set())
+
+    def test_every_printed_row_carries_metrics(self):
+        """A restricted plan means no row resolves to None."""
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [
+                    self._phase2_run("random_forest", "proposed", ("prop", "len")),
+                    self._phase2_run("random_forest", "perbandingan_3", ()),
+                ],
+            )
+            rows = self._rows_for(read_summaries([path]))
+        for row in rows:
+            with self.subTest(note=row[2]):
+                self.assertNotEqual(row[3], "", "internal ROC AUC is blank")
+                self.assertEqual(row[10], "TRUE", "external flag is not set")
+                self.assertNotEqual(row[11], "", "external ROC AUC is blank")
+
+    def test_a_phase1_only_sweep_reports_no_external_numbers(self):
+        with TemporaryDirectory() as directory:
+            path = _write(
+                directory,
+                [_run("random_forest", "proposed", ("prop", "len"))],
+            )
+            rows = self._rows_for(read_summaries([path]))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][10], "FALSE")
+        self.assertEqual(rows[0][11], "")

@@ -352,10 +352,15 @@ def build_table(
         raise ValueError(f"threshold must be one of {sorted(EXTERNAL_PREFIXES)}.")
 
     by_key = _index_summaries(summaries)
+    # Restricted the same way build_internal_table restricts it. Without this
+    # the publication table carries every row full_row_plan can name, which
+    # includes the superseded BIO/PROT combinations the matrix stopped
+    # producing: 31 permanently blank rows per model.
+    plan = _rows_present(summaries)
 
     rows: list[list[str]] = []
     for number, model_type in enumerate(model_order, start=1):
-        entries = _model_entries(by_key, model_type)
+        entries = _model_entries(by_key, model_type, plan)
 
         for index, (note, row) in enumerate(entries):
             cells = [
