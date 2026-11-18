@@ -1,0 +1,15 @@
+{
+  "dataset": "sars",
+  "encoder": "Rostlab/prot_t5_xl_half_uniref50-enc",
+  "tokenizer": "Rostlab/prot_t5_xl_uniref50",
+  "pooling": "mean over non-special ProtT5 residue tokens",
+  "embedding_dimension": 1024,
+  "number_of_sequences": 467,
+  "max_peptide_length": 20,
+  "peptide_source": "every unique peptide_seq in the raw CSV; labels not read",
+  "device": "auto",
+  "python": "3.13.18",
+  "numpy": "2.1.3",
+  "sha256": "c2bcf789488fe7a34dbd11c10472826709d21e1f20981b7106f48123a313909c",
+  "file": "sars_prott5.npz"
+}
