@@ -16,6 +16,8 @@ from ML.experiment_matrix import (
     PROTEIN_GROUPS,
     FEATURE_GROUPS,
     FEATURE_SETS,
+    COMPARISON_FEATURE_SETS,
+    DEFAULT_COMPARISON_FEATURE_SETS,
     MODEL_TYPES,
     ExperimentSpec,
     _configure_run,
@@ -257,6 +259,92 @@ class SummaryMergeTests(unittest.TestCase):
             )
 
             self.assertEqual([row["experiment_id"] for row in merged], ["a"])
+
+
+class ComparisonProfileSelectionTests(unittest.TestCase):
+    """A profile outside the default sweep must be runnable on its own.
+
+    FS-5 (ProtT5) is far more expensive than the tabular profiles and phase 1's
+    artifacts are frozen, so it has to run as its own sweep without changing
+    what the default sweep plans.
+    """
+
+    def test_naming_one_profile_runs_only_that_profile(self):
+        specs = build_experiment_matrix(
+            comparison_feature_sets=("perbandingan_5",)
+        )
+        self.assertEqual(len(specs), len(MODEL_TYPES))
+        self.assertEqual(
+            {spec.feature_set for spec in specs}, {"perbandingan_5"}
+        )
+        self.assertEqual(
+            {spec.model_type for spec in specs}, set(MODEL_TYPES)
+        )
+
+    def test_the_default_sweep_is_unchanged_by_the_new_parameter(self):
+        # The guard that matters: phase 1 ran 124 runs and its artifacts are
+        # frozen, so the default plan must not move when a profile is added to
+        # the registry.
+        specs = build_experiment_matrix()
+        self.assertEqual(len(specs), 124)
+        self.assertNotIn(
+            "perbandingan_5", {spec.feature_set for spec in specs}
+        )
+        self.assertEqual(
+            DEFAULT_COMPARISON_FEATURE_SETS,
+            tuple(name for name in FEATURE_SETS if name != "proposed"),
+        )
+
+    def test_every_default_profile_is_a_known_profile(self):
+        for name in DEFAULT_COMPARISON_FEATURE_SETS:
+            self.assertIn(name, COMPARISON_FEATURE_SETS)
+
+    def test_restricting_the_profiles_switches_the_other_arms_off(self):
+        specs = build_experiment_matrix(
+            comparison_feature_sets=("perbandingan_5",)
+        )
+        arms = {spec.feature_set for spec in specs}
+        self.assertNotIn("proposed", arms)
+        self.assertNotIn("kontras", arms)
+
+    def test_the_proposed_arm_can_still_be_asked_for_explicitly(self):
+        specs = build_experiment_matrix(
+            MODEL_TYPES,
+            ("prop", "len"),
+            comparison_feature_sets=("perbandingan_5",),
+            include_proposed=True,
+        )
+        self.assertEqual(len(specs), 2 * len(MODEL_TYPES))
+        self.assertEqual(
+            {spec.feature_set for spec in specs},
+            {"proposed", "perbandingan_5"},
+        )
+
+    def test_an_unknown_profile_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_experiment_matrix(comparison_feature_sets=("perbandingan_9",))
+
+    def test_naming_no_profile_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_experiment_matrix(comparison_feature_sets=())
+
+    def test_switching_every_arm_off_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_experiment_matrix(
+                MODEL_TYPES,
+                include_comparisons=False,
+                include_contrasts=False,
+                include_proposed=False,
+            )
+
+    def test_identifiers_stay_unique_when_profiles_are_combined(self):
+        specs = build_experiment_matrix(
+            comparison_feature_sets=("perbandingan_4", "perbandingan_5"),
+        )
+        self.assertEqual(len(specs), 2 * len(MODEL_TYPES))
+        self.assertEqual(
+            len({spec.experiment_id for spec in specs}), len(specs)
+        )
 
 
 if __name__ == "__main__":

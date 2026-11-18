@@ -98,6 +98,21 @@ FEATURE_SETS = (
     "perbandingan_2",
     "perbandingan_3",
 )
+# Every published profile the pipeline can reconstruct. FEATURE_SETS above is
+# the DEFAULT sweep and deliberately stays at three: adding a name there would
+# change the planned run count of every notebook that already ran, and phase
+# 1's artifacts are frozen. A profile outside the default is requested by name
+# through comparison_feature_sets, which runs it on its own.
+COMPARISON_FEATURE_SETS = (
+    "perbandingan_1",
+    "perbandingan_2",
+    "perbandingan_3",
+    "perbandingan_4",
+    "perbandingan_5",
+)
+DEFAULT_COMPARISON_FEATURE_SETS = tuple(
+    name for name in FEATURE_SETS if name != "proposed"
+)
 # Feature sets whose columns come from feature_groups rather than a fixed
 # profile. Only "proposed" enters the one-standard-error selection; the other
 # two are reported and never selected from.
@@ -261,6 +276,8 @@ def build_experiment_matrix(
     include_comparisons: bool = True,
     include_contrasts: bool | None = None,
     contrast_groups: Iterable[str] | None = None,
+    comparison_feature_sets: Iterable[str] | None = None,
+    include_proposed: bool | None = None,
 ) -> list[ExperimentSpec]:
     """Build the proposed power set, the planned contrasts, and the baselines.
 
@@ -274,6 +291,11 @@ def build_experiment_matrix(
                      part 4: each PROTEIN_GROUP alone
                      part 5: CONTRAST_BACKBONE without the always-on groups
        3  perbandingan  part 6: FS-1, FS-2, FS-3 exactly as published
+
+    Passing comparison_feature_sets restricts part 6 to the named profiles and,
+    like the proposed-arm restrictions, switches the other arms off unless they
+    are asked for explicitly. That is how a profile outside the default sweep
+    is run on its own, without changing what the default sweep plans.
 
     Passing feature_groups restricts the proposed arm to that single frozen
     combination, which is what phase 2 runs once a configuration is selected.
@@ -289,8 +311,30 @@ def build_experiment_matrix(
             "(several), not both."
         )
     restricted = feature_groups is not None or feature_combinations is not None
+
+    if comparison_feature_sets is None:
+        selected_comparisons = DEFAULT_COMPARISON_FEATURE_SETS
+        comparisons_restricted = False
+    else:
+        selected_comparisons = tuple(dict.fromkeys(comparison_feature_sets))
+        comparisons_restricted = True
+        if not selected_comparisons:
+            raise ValueError(
+                "comparison_feature_sets must name at least one profile."
+            )
+        unknown_profiles = [
+            name for name in selected_comparisons
+            if name not in COMPARISON_FEATURE_SETS
+        ]
+        if unknown_profiles:
+            raise ValueError(
+                f"Unsupported comparison feature sets: {sorted(unknown_profiles)}."
+            )
+
     if include_contrasts is None:
-        include_contrasts = not restricted
+        include_contrasts = not (restricted or comparisons_restricted)
+    if include_proposed is None:
+        include_proposed = not comparisons_restricted
 
     selected_models = tuple(model_types) if model_types else MODEL_TYPES
     unknown_models = [model for model in selected_models if model not in MODEL_TYPES]
@@ -327,10 +371,11 @@ def build_experiment_matrix(
 
     specs: list[ExperimentSpec] = []
     for model_type in selected_models:
-        specs.extend(
-            ExperimentSpec("proposed", model_type, combination)
-            for combination in proposed_combinations
-        )
+        if include_proposed:
+            specs.extend(
+                ExperimentSpec("proposed", model_type, combination)
+                for combination in proposed_combinations
+            )
         specs.extend(
             ExperimentSpec("kontras", model_type, combination)
             for combination in contrast_combinations
@@ -338,15 +383,18 @@ def build_experiment_matrix(
         if include_comparisons:
             specs.extend(
                 ExperimentSpec(feature_set, model_type)
-                for feature_set in FEATURE_SETS
-                if feature_set != "proposed"
+                for feature_set in selected_comparisons
             )
 
     per_model = (
-        len(proposed_combinations)
+        (len(proposed_combinations) if include_proposed else 0)
         + len(contrast_combinations)
-        + ((len(FEATURE_SETS) - 1) if include_comparisons else 0)
+        + (len(selected_comparisons) if include_comparisons else 0)
     )
+    if per_model == 0:
+        raise ValueError(
+            "Every arm is switched off, so there is nothing to run."
+        )
     expected = len(selected_models) * per_model
     if len(specs) != expected:
         raise RuntimeError(
@@ -518,6 +566,8 @@ def run_experiment_matrix(
     include_comparisons: bool = True,
     include_contrasts: bool | None = None,
     contrast_groups: Iterable[str] | None = None,
+    comparison_feature_sets: Iterable[str] | None = None,
+    include_proposed: bool | None = None,
     tuning_metric: str | None = None,
     resume: bool = False,
 ) -> list[dict[str, Any]]:
@@ -546,6 +596,8 @@ def run_experiment_matrix(
         include_comparisons=include_comparisons,
         include_contrasts=include_contrasts,
         contrast_groups=contrast_groups,
+        comparison_feature_sets=comparison_feature_sets,
+        include_proposed=include_proposed,
     )
     _preflight(base_config, specs)
     # Warn rather than refuse: a deliberate robustness run in another
