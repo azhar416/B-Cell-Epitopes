@@ -117,7 +117,7 @@ DEFAULT_COMPARISON_FEATURE_SETS = tuple(
 # profile. Only "proposed" enters the one-standard-error selection; the other
 # two are reported and never selected from.
 GROUPED_FEATURE_SETS = ("proposed", "kontras")
-# SVM was dropped from the sweep for computational budget: on 14,358 rows its
+# SVM was dropped from the sweep for computational budget: on 14,323 rows its
 # cost grows as n^2.3 and the calibration wrapper fits it four times per model
 # fit, which put phase 1 past Kaggle's 12 h session cap. CFG and model.py still
 # support it, and HYPERPARAMETER_TUNING_CANDIDATES still holds its grid, so it

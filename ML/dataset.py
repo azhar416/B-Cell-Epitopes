@@ -153,6 +153,40 @@ def load_labeled_dataset(
     removed_duplicates = int(duplicate.sum())
     dataframe = dataframe.loc[~duplicate].reset_index(drop=True)
 
+    # Any peptide that also appears in SARS leaves the development set here,
+    # unconditionally, so that no peptide the external evaluation scores was
+    # ever trained on. Doing it in cleaning rather than in the external arm
+    # means phase 1 and phase 2 share one development set, and "unseen" is
+    # true of the protocol rather than of one arm of it.
+    #
+    # Only SARS peptide STRINGS are read, never its target column, so phase 1
+    # still leaves the SARS labels untouched. The length limit is applied to
+    # them too: a SARS peptide that cleaning would drop as overlength is not
+    # part of the evaluation and so cannot be an overlap.
+    removed_external_overlap = 0
+    if dataset_name == "bcell":
+        external_path = Path(data_dir) / DATASET_FILENAMES["sars"]
+        if not external_path.is_file():
+            raise FileNotFoundError(
+                f"{external_path} is required even to load B-cell: the "
+                "development set is defined as the cleaned B-cell rows minus "
+                "every peptide that also appears in SARS. Without it the "
+                "overlap cannot be removed and the external evaluation would "
+                "not be on unseen peptides."
+            )
+        external = pd.read_csv(external_path, usecols=["peptide_seq"])
+        external_peptides = {
+            sequence
+            for sequence in (
+                normalize_sequence(value, row_label=index)
+                for index, value in external["peptide_seq"].items()
+            )
+            if len(sequence) <= max_peptide_length
+        }
+        overlapping = dataframe["peptide_seq"].isin(external_peptides)
+        removed_external_overlap = int(overlapping.sum())
+        dataframe = dataframe.loc[~overlapping].reset_index(drop=True)
+
     if feature_set == "perbandingan_4":
         bert_columns = get_bert_cls_columns(dataframe.columns)
         if not bert_columns:
@@ -253,11 +287,15 @@ def load_labeled_dataset(
     if dataframe.empty or dataframe["target"].nunique() != 2:
         raise ValueError("The cleaned dataset must contain examples of both classes.")
 
+    overlap_note = (
+        f", {removed_external_overlap:,} also present in SARS"
+        if dataset_name == "bcell" else ""
+    )
     print(
         f"Cleaning {dataset_name}: {input_rows:,} -> {len(dataframe):,} rows "
         f"(removed {removed_long:,} overlength, "
         f"{removed_conflicting:,} conflicting-label, "
-        f"{removed_duplicates:,} duplicate rows)."
+        f"{removed_duplicates:,} duplicate rows{overlap_note})."
     )
     print(
         "Class counts: "

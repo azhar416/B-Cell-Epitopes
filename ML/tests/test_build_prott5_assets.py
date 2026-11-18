@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,6 +54,46 @@ class LabelFreePeptideListTests(unittest.TestCase):
         cleaned = load_labeled_dataset("sars", DATA_DIR)["peptide_seq"].tolist()
         self.assertEqual(sequences, cleaned)
 
+
+
+class DevelopmentSetExcludesSarsTests(unittest.TestCase):
+    """The external claim rests on the development set sharing no peptide.
+
+    Cleaning removes the overlap, so this is the test that would catch it
+    coming back. It belongs here rather than in the external arm's tests:
+    the point of removing it in the loader is that phase 1 and phase 2 share
+    one development set, so phase 1 must see the removal too.
+    """
+
+    def test_no_cleaned_bcell_peptide_appears_in_sars(self):
+        bcell = load_labeled_dataset("bcell", DATA_DIR)
+        sars = load_labeled_dataset("sars", DATA_DIR)
+        shared = set(bcell["peptide_seq"]) & set(sars["peptide_seq"])
+        self.assertEqual(shared, set())
+
+    def test_sars_is_kept_whole(self):
+        # The overlap leaves the training side, never the test side: SARS is
+        # one protein and already the weakest part of the evidence.
+        sars = load_labeled_dataset("sars", DATA_DIR)
+        self.assertEqual(len(sars), 467)
+
+    def test_every_protein_survives_the_removal(self):
+        # A protein wiped out entirely would change the grouped fold split
+        # for reasons unrelated to the features.
+        bcell = load_labeled_dataset("bcell", DATA_DIR)
+        self.assertEqual(bcell["parent_protein_id"].nunique(), 758)
+
+    def test_both_classes_survive_the_removal(self):
+        bcell = load_labeled_dataset("bcell", DATA_DIR)
+        self.assertEqual(sorted(bcell["target"].unique()), [0, 1])
+
+    def test_loading_bcell_without_sars_is_refused(self):
+        # Silently skipping the removal would put leakage back without a
+        # word, so a missing SARS file has to be an error.
+        with tempfile.TemporaryDirectory() as directory:
+            shutil.copy(DATA_DIR / "input_bcell.csv", Path(directory))
+            with self.assertRaises(FileNotFoundError):
+                load_labeled_dataset("bcell", Path(directory))
 
 if __name__ == "__main__":
     unittest.main()

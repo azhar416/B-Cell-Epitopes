@@ -138,10 +138,12 @@ def _build_configured_features(
 def _audit_exact_overlap(
     bcell: pd.DataFrame, sars: pd.DataFrame
 ) -> tuple[dict[str, int], set[str]]:
-    """Count cleaned B-cell peptides that reappear verbatim in SARS.
+    """Confirm no cleaned B-cell peptide reappears in SARS, and record it.
 
-    These rows are deliberately retained on both sides, so the audit records
-    how far the external evaluation falls short of fully unseen data.
+    Cleaning removes the overlap from the development set, so this is a guard
+    rather than a disclosure: it must come back empty. It is kept, and kept
+    loud, because the whole external claim rests on that emptiness, and a
+    future change to the loader would otherwise break it in silence.
     """
     overlap_mask = bcell["peptide_seq"].isin(set(sars["peptide_seq"]))
     overlap_sequences = set(bcell.loc[overlap_mask, "peptide_seq"])
@@ -158,6 +160,13 @@ def _audit_exact_overlap(
         "bcell_rows_retained_in_development": int(overlap_mask.sum()),
         "sars_rows_retained_for_external_evaluation": int(len(sars)),
     }
+    if overlap_sequences:
+        raise RuntimeError(
+            f"{len(overlap_sequences):,} peptide(s) appear in both the "
+            "development set and SARS, so the external evaluation would not "
+            "be on unseen peptides. Cleaning is supposed to have removed "
+            "them; ML.dataset.load_labeled_dataset is where that happens."
+        )
     return audit, overlap_sequences
 
 
@@ -430,9 +439,10 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "external_sars_class_counts": pd.Series(sars_labels).value_counts().sort_index().to_dict(),
         "exact_sequence_overlap_audit": overlap_report,
         "exact_sequence_overlap_handling": (
-            "All cleaned B-cell rows are retained for internal selection and "
-            "final training. Exact peptide overlaps also remain in external "
-            "SARS evaluation, so those rows are not an independent test."
+            "Cleaning removes every B-cell peptide that also appears in SARS, "
+            "for internal selection and final training alike, so no peptide "
+            "scored in the external evaluation was ever trained on. SARS "
+            "itself is kept whole."
         ),
         "internal_bcell_cv": {
             "protocol": internal_cv_report["validation_metrics_interpretation"],
@@ -496,9 +506,9 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "artifact_directory": str(output_dir),
         "interpretation_limit": (
             "The cleaned SARS dataset contains one parent protein; this is a "
-            "single-protein external evaluation, not broad unseen-protein validation. "
-            "Exact B-cell/SARS peptide overlaps are retained, so overlap rows "
-            "may have optimistic or conflicting-label results."
+            "single-protein external evaluation, not broad unseen-protein "
+            "validation. Peptides shared with B-cell were removed from the "
+            "development set, so every SARS row scored here is unseen."
         ),
         "configuration": {
             key: str(value) if isinstance(value, Path) else value
@@ -535,6 +545,7 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
         "external_evaluation_dataset": "sars",
         "selected_hyperparameters": selection["parameters"],
         "exact_overlap_sequences_retained_in_training": len(overlap_sequences),
+        "development_excludes_sars_peptides": True,
     }
     dump(bundle, output_dir / "peptide_classifier.joblib")
 
@@ -548,10 +559,8 @@ def _run_external_sars(config: CFG) -> dict[str, object]:
     )
     print(
         f"External SARS evaluation complete: {len(sars):,} peptides from "
-        f"{sars.parent_protein_id.nunique():,} protein(s); "
-        f"retained {overlap_report['bcell_rows_retained_in_development']:,} "
-        "B-cell rows with "
-        f"{len(overlap_sequences):,} exact SARS peptide overlaps in development."
+        f"{sars.parent_protein_id.nunique():,} protein(s), none of whose "
+        "peptides appear in the development set."
     )
     print(f"Saved experiment artifacts to: {output_dir}")
     return report
