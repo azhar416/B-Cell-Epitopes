@@ -43,29 +43,52 @@ def _read_prottrans_embeddings(
             f"received {cache_dir}."
         ) from error
 
-    # The repository's B-cell cache is stored as four .npy files. SARS uses
-    # the same cache schema in one .npz file because it has a separate sequence set.
-    legacy_bcell_files = {
+    # One cache, three shapes on disk, all carrying the same four arrays:
+    #
+    #   <dataset>_prott5.npz          what ML.build_prott5_assets writes
+    #   <dataset>_prott5/*.npy        the same arrays unpacked into a folder,
+    #                                 which is how a cache too large to commit
+    #                                 as one blob ends up in the repository
+    #   *.npy directly in cache_dir   the original B-cell cache's layout
+    #
+    # All three are accepted because which one is present is a packaging
+    # decision, not a difference in the vectors.
+    array_names = {
         "sequences.npy",
         "embeddings.npy",
         "model_name.npy",
         "tokenizer_name.npy",
     }
-    if dataset_name == "bcell" and all(
-        (cache_dir / name).is_file() for name in legacy_bcell_files
-    ):
-        sequences = np.load(cache_dir / "sequences.npy", allow_pickle=False).astype(str).tolist()
-        embeddings = np.load(cache_dir / "embeddings.npy", allow_pickle=False).astype(np.float32)
-        model_name = str(np.load(cache_dir / "model_name.npy", allow_pickle=False).item())
-        tokenizer_name = str(np.load(cache_dir / "tokenizer_name.npy", allow_pickle=False).item())
+
+    def _read_npy_directory(directory: Path) -> tuple[list[str], np.ndarray, str, str]:
+        return (
+            np.load(directory / "sequences.npy", allow_pickle=False).astype(str).tolist(),
+            np.load(directory / "embeddings.npy", allow_pickle=False).astype(np.float32),
+            str(np.load(directory / "model_name.npy", allow_pickle=False).item()),
+            str(np.load(directory / "tokenizer_name.npy", allow_pickle=False).item()),
+        )
+
+    unpacked_dir = cache_dir / f"{dataset_name}_prott5"
+    flat_is_this_dataset = dataset_name == "bcell" and all(
+        (cache_dir / name).is_file() for name in array_names
+    )
+    if all((unpacked_dir / name).is_file() for name in array_names):
+        sequences, embeddings, model_name, tokenizer_name = _read_npy_directory(
+            unpacked_dir
+        )
+    elif flat_is_this_dataset:
+        sequences, embeddings, model_name, tokenizer_name = _read_npy_directory(
+            cache_dir
+        )
     else:
         cache_path = cache_dir / f"{dataset_name}_prott5.npz"
         if not cache_path.is_file():
             raise FileNotFoundError(
-                f"Precomputed ProtT5 vectors not found: {cache_path}. Place "
-                f"{dataset_name}_prott5.npz in ML/assets/perbandingan_5. "
-                "The cache must contain sequences, embeddings, model_name, and "
-                "tokenizer_name arrays."
+                "Precomputed ProtT5 vectors not found for "
+                f"{dataset_name}. Looked for {cache_path.name}, and for a "
+                f"{unpacked_dir.name}/ folder holding {sorted(array_names)}, "
+                f"under {cache_dir}. Build them with "
+                "'python -m ML.build_prott5_assets'."
             )
         with np.load(cache_path, allow_pickle=False) as cache:
             required = {"sequences", "embeddings", "model_name", "tokenizer_name"}

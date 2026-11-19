@@ -90,8 +90,15 @@ def _load_encoder(device_name: str):
     return torch, tokenizer, model, device
 
 
-def encode(sequences: list[str], batch_size: int, device_name: str) -> np.ndarray:
-    """Mean-pool each peptide over its residue tokens, special tokens excluded."""
+def encode(sequences: list[str], batch_size: int,
+           device_name: str) -> tuple[np.ndarray, str, str]:
+    """Mean-pool each peptide over its residue tokens, special tokens excluded.
+
+    Returns the vectors plus the RESOLVED device and dtype. Recording the
+    request ("auto") instead would make the provenance useless: a GPU build
+    and a CPU build would both say "auto", while their vectors differ by
+    about 3e-4 because one is float16 and the other float32.
+    """
     if not sequences:
         raise ValueError("Cannot encode an empty sequence list.")
     if batch_size < 1:
@@ -132,7 +139,11 @@ def encode(sequences: list[str], batch_size: int, device_name: str) -> np.ndarra
             done = min(start + batch_size, len(sequences))
             if done % (batch_size * 25) == 0 or done == len(sequences):
                 print(f"    {done:,}/{len(sequences):,}")
-    return np.concatenate(vectors, axis=0).astype(np.float32, copy=False)
+    return (
+        np.concatenate(vectors, axis=0).astype(np.float32, copy=False),
+        device.type,
+        str(model.dtype).replace("torch.", ""),
+    )
 
 
 def peptide_list(dataset_name: str, data_dir: Path, label_free: bool,
@@ -194,7 +205,9 @@ def build(dataset_name: str, data_dir: Path, batch_size: int, device: str,
     sequences = peptide_list(dataset_name, data_dir, label_free,
                              max_peptide_length=max_peptide_length)
 
-    embeddings = encode(sequences, batch_size, device)
+    embeddings, resolved_device, resolved_dtype = encode(
+        sequences, batch_size, device
+    )
     if embeddings.shape != (len(sequences), PROTTRANS_DIMENSION):
         raise SystemExit(f"Unexpected embedding shape {embeddings.shape}.")
     if not np.isfinite(embeddings).all():
@@ -223,7 +236,9 @@ def build(dataset_name: str, data_dir: Path, batch_size: int, device: str,
                     "every unique peptide_seq in the raw CSV; labels not read"
                     if label_free else "cleaned dataset peptides"
                 ),
-                "device": device,
+                "device_requested": device,
+                "device": resolved_device,
+                "dtype": resolved_dtype,
                 "python": platform.python_version(),
                 "numpy": np.__version__,
                 "sha256": digest,
