@@ -98,13 +98,15 @@ def build_feature_frame(
     """Build one of the paper-based comparison profiles or proposed features."""
     if not isinstance(feature_set, str):
         raise ValueError(
-            "feature_set must be 'perbandingan_1', 'perbandingan_2', "
+            "feature_set must be 'perbandingan_1', 'perbandingan_1b', "
+            "'perbandingan_2', "
             "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
             "'kontras', or 'proposed'."
         )
     feature_set = feature_set.strip().lower().replace(" ", "_")
     if feature_set not in {
         "perbandingan_1",
+        "perbandingan_1b",
         "perbandingan_2",
         "perbandingan_3",
         "perbandingan_4",
@@ -113,30 +115,42 @@ def build_feature_frame(
         "proposed",
     }:
         raise ValueError(
-            "feature_set must be 'perbandingan_1', 'perbandingan_2', "
+            "feature_set must be 'perbandingan_1', 'perbandingan_1b', "
+            "'perbandingan_2', "
             "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
             "'kontras', or 'proposed'."
         )
 
-    if feature_set == "perbandingan_1":
-        # Six columns, following the paper's own feature engineering. It drops
-        # the protein id, start_position and end_position, replacing the last
-        # two with "position" = (end - start) + 1. It also drops protein_length
-        # ("it was not used in this study") and isoelectric_point, aromaticity,
-        # hydrophobicity and stability, which the paper notes "are the same in
-        # all peptides as they are properties dependent on the protein
-        # sequence". Only the four peptide-level propensity scales remain, so
-        # protein_seq is not needed at all.
+    if feature_set in {"perbandingan_1", "perbandingan_1b"}:
+        # Cihan and Ozger engineer their two datasets differently. The
+        # SARS-CoV paragraph drops protein_length and the four protein-level
+        # descriptors because "all peptides in the SARS-CoV dataset were
+        # identified from the same protein sequence", which makes them
+        # constant. The B-cell paragraph removes only the categorical columns
+        # and says "Position, protein length, and peptide length variables
+        # were added", and their Table 2 shows the four descriptors varying
+        # across 757 proteins. So the published B-cell profile keeps them.
+        #
+        #   perbandingan_1   eleven columns, as published for B-cell
+        #   perbandingan_1b  the six peptide-level columns, which is their
+        #                    SARS-CoV engineering applied consistently
+        #
+        # Both drop the protein id, and both replace start/end with
+        # "position" = (end - start) + 1, which the paper states for each
+        # dataset.
+        peptide_level_only = feature_set == "perbandingan_1b"
         required_columns = {
             sequence_column,
             "start_position",
             "end_position",
             *PROP_COLUMNS,
         }
+        if not peptide_level_only:
+            required_columns |= {*PROTGLOBAL_COLUMNS, "protein_seq"}
         missing_columns = required_columns.difference(dataframe.columns)
         if missing_columns:
             raise ValueError(
-                "The perbandingan_1 feature set requires columns: "
+                f"The {feature_set} feature set requires columns: "
                 f"{sorted(missing_columns)}."
             )
         peptide_sequences = [
@@ -162,6 +176,15 @@ def build_feature_frame(
         )
         for column in PROP_COLUMNS:
             features[column] = pd.to_numeric(dataframe[column], errors="coerce")
+        if not peptide_level_only:
+            for column in PROTGLOBAL_COLUMNS:
+                features[column] = pd.to_numeric(dataframe[column], errors="coerce")
+            # "the protein length variable was obtained from the length of the
+            # protein sequence", which is constant inside a protein and so
+            # constant across all of SARS.
+            features["protein_length"] = [
+                len(str(value)) for value in dataframe["protein_seq"]
+            ]
         return features
 
     if feature_set == "perbandingan_2":

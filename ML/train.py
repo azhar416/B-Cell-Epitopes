@@ -1077,6 +1077,7 @@ def parse_args() -> argparse.Namespace:
         "--feature-set",
         choices=(
             "perbandingan_1",
+            "perbandingan_1b",
             "perbandingan_2",
             "perbandingan_3",
             "perbandingan_4",

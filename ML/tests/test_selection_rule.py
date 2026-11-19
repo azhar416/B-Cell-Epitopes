@@ -418,11 +418,11 @@ class FrozenCombinationRunTests(unittest.TestCase):
         proposed = [spec for spec in specs if spec.feature_set == "proposed"]
         baselines = [spec for spec in specs if spec.feature_set != "proposed"]
 
-        # every model x (1 frozen combination + 3 paper feature sets).
+        # every model x (1 frozen combination + 4 paper feature sets).
         models = len(MODEL_TYPES)
-        self.assertEqual(len(specs), 4 * models)
+        self.assertEqual(len(specs), 5 * models)
         self.assertEqual(len(proposed), models)
-        self.assertEqual(len(baselines), 3 * models)
+        self.assertEqual(len(baselines), 4 * models)
         self.assertEqual(
             {spec.feature_groups for spec in proposed}, {("aac", "prop", "len")}
         )

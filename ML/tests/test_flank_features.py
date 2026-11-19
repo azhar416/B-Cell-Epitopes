@@ -270,7 +270,7 @@ class MatrixShapeTests(unittest.TestCase):
     def test_full_sweep_is_thirty_one_configurations_per_model(self):
         specs = build_experiment_matrix()
 
-        self.assertEqual(len(specs), 31 * len(MODEL_TYPES))
+        self.assertEqual(len(specs), 32 * len(MODEL_TYPES))
         counts = {name: 0 for name in ("proposed", "kontras")}
         for spec in specs:
             if spec.feature_set in counts:
@@ -565,15 +565,60 @@ class ReconstructionTests(unittest.TestCase):
                     )
                 )
 
-    def test_fs1_reduces_to_a_part_one_combination(self):
-        """Its paper drops protein_length and the four protein-level columns.
+    def test_fs1_is_prop_plus_len_plus_protglobal_plus_protlen(self):
+        """As published for B-cell, FS-1 sits two rungs up the ladder.
 
-        What remains is the propensity scales plus peptide length, which is a
-        power-set member, not a rung of the ladder. The only extra column is
-        "position", which the paper also lists and which duplicates peptide
-        length on this data.
+        Cihan and Ozger drop protein_length and the four protein-level
+        descriptors only for SARS-CoV, where one protein makes them constant.
+        Their B-cell paragraph removes the categorical columns and adds
+        protein length back, and their Table 2 shows the descriptors varying
+        across 757 proteins.
         """
         published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
+        rebuilt = self._by_groups(PAPER_RECONSTRUCTIONS["perbandingan_1"])
+
+        self.assertEqual(published.shape[1], 11)
+        # "position" is the only extra: the paper lists it alongside peptide
+        # length, and it duplicates peptide length on this data.
+        self.assertEqual(set(published.columns) - set(rebuilt.columns), {"position"})
+        self.assertFalse(set(rebuilt.columns) - set(published.columns))
+        for column in rebuilt.columns:
+            with self.subTest(column=column):
+                self.assertTrue(
+                    np.allclose(
+                        published[column].to_numpy(float),
+                        rebuilt[column].to_numpy(float),
+                        equal_nan=True,
+                    )
+                )
+
+    def test_fs1_keeps_the_five_protein_level_columns(self):
+        """Reported because they go constant on a single-protein target."""
+        published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
+
+        self.assertTrue(
+            {
+                "protein_length",
+                "isoelectric_point",
+                "aromaticity",
+                "hydrophobicity",
+                "stability",
+            }.issubset(published.columns)
+        )
+        # The categorical and coordinate columns are still dropped: the paper
+        # replaces start/end with "position" and removes the protein id.
+        self.assertFalse(
+            set(published.columns)
+            & {"parent_protein_id", "start_position", "end_position"}
+        )
+
+    def test_fs1b_reduces_to_a_part_one_combination(self):
+        """FS-1b is the SARS-CoV engineering applied consistently.
+
+        What remains is the propensity scales plus peptide length, which is a
+        power-set member, not a rung of the ladder.
+        """
+        published = build_feature_frame(self._frame(), feature_set="perbandingan_1b")
         rebuilt = self._by_groups(PAPER_1_EQUIVALENT)
 
         self.assertEqual(published.shape[1], 6)
@@ -595,9 +640,10 @@ class ReconstructionTests(unittest.TestCase):
                     )
                 )
 
-    def test_fs1_keeps_no_protein_level_column(self):
-        """The paper removed them on purpose; our profile must not add them."""
-        published = build_feature_frame(self._frame(), feature_set="perbandingan_1")
+    def test_fs1b_keeps_no_protein_level_column(self):
+        """That is what distinguishes it from FS-1; if it drifts, both rows
+        collapse into one and the comparison loses its point."""
+        published = build_feature_frame(self._frame(), feature_set="perbandingan_1b")
         removed = {
             "protein_length",
             "isoelectric_point",
@@ -611,8 +657,26 @@ class ReconstructionTests(unittest.TestCase):
 
         self.assertFalse(set(published.columns) & removed)
 
-    def test_fs1_is_not_a_ladder_rung(self):
-        self.assertNotIn("perbandingan_1", PAPER_RECONSTRUCTIONS)
+    def test_the_two_fs1_rows_differ_by_exactly_the_protein_level_columns(self):
+        frame = self._frame()
+        full = build_feature_frame(frame, feature_set="perbandingan_1")
+        core = build_feature_frame(frame, feature_set="perbandingan_1b")
+
+        self.assertEqual(
+            set(full.columns) - set(core.columns),
+            {
+                "protein_length",
+                "isoelectric_point",
+                "aromaticity",
+                "hydrophobicity",
+                "stability",
+            },
+        )
+        self.assertFalse(set(core.columns) - set(full.columns))
+
+    def test_fs1_is_a_ladder_rung_and_fs1b_is_not(self):
+        self.assertIn("perbandingan_1", PAPER_RECONSTRUCTIONS)
+        self.assertNotIn("perbandingan_1b", PAPER_RECONSTRUCTIONS)
         self.assertIn(PAPER_1_EQUIVALENT, ALL_COMBINATIONS)
 
     def test_fs3_is_not_reconstructible(self):

@@ -108,6 +108,7 @@ def predict_peptides(
     )
     if feature_profile in {
         "perbandingan_1",
+        "perbandingan_1b",
         "perbandingan_2",
         "perbandingan_3",
     }:
@@ -146,6 +147,7 @@ def predict_peptides(
     )
     if feature_profile in {
         "perbandingan_1",
+        "perbandingan_1b",
         "perbandingan_2",
         "perbandingan_3",
     }:
@@ -293,14 +295,17 @@ def predict_peptides(
         for column in needed_descriptors:
             input_frame[column] = descriptor_data[column].to_numpy()
 
-    if feature_profile == "perbandingan_1":
-        # protein_seq is no longer needed: the profile keeps no protein-level
-        # column, only peptide length, position and the propensity scales.
+    if feature_profile in {"perbandingan_1", "perbandingan_1b"}:
+        # FS-1 as published for B-cell carries protein_length, so it needs the
+        # protein sequence to measure. FS-1b is the peptide-level core and
+        # needs only the coordinates and the propensity scales.
         required_columns = {"start_position", "end_position"}
+        if feature_profile == "perbandingan_1":
+            required_columns.add("protein_seq")
         if protein_context_data is None:
             raise ValueError(
-                "A perbandingan_1 model needs protein_context_data containing "
-                "protein_seq, start_position, and end_position."
+                f"A {feature_profile} model needs protein_context_data "
+                f"containing {sorted(required_columns)}."
             )
         missing = required_columns.difference(protein_context_data.columns)
         if missing:
@@ -318,7 +323,7 @@ def predict_peptides(
         if required_descriptors:
             if descriptor_data is None:
                 raise ValueError(
-                    "A perbandingan_1 model needs descriptor_data containing: "
+                    f"A {feature_profile} model needs descriptor_data containing: "
                     f"{sorted(required_descriptors)}."
                 )
             missing_descriptors = required_descriptors.difference(

@@ -148,7 +148,7 @@ class TwoPhaseSweepTests(unittest.TestCase):
         modes = {call.args[0].TRAINING_MODE for call in mocked.call_args_list}
         self.assertEqual(modes, {"same_dataset"})
         # 15 power-set + 10 contrast + 2 reconstruction + 3 published.
-        self.assertEqual(len(rows), 31)
+        self.assertEqual(len(rows), 32)
         self.assertTrue(all(row["training_mode"] == "same_dataset" for row in rows))
 
     def test_phase_two_uses_the_external_mode(self):
@@ -168,12 +168,12 @@ class TwoPhaseSweepTests(unittest.TestCase):
         self.assertEqual(modes, {"external_sars"})
 
     def test_restricting_models_scales_the_matrix(self):
-        self.assertEqual(len(build_experiment_matrix(("xgboost",))), 31)
+        self.assertEqual(len(build_experiment_matrix(("xgboost",))), 32)
         self.assertEqual(
-            len(build_experiment_matrix(("xgboost", "random_forest"))), 62
+            len(build_experiment_matrix(("xgboost", "random_forest"))), 64
         )
         self.assertEqual(
-            len(build_experiment_matrix()), 31 * len(MODEL_TYPES)
+            len(build_experiment_matrix()), 32 * len(MODEL_TYPES)
         )
 
     def test_unknown_model_is_rejected(self):
@@ -529,10 +529,10 @@ class SummaryTableTests(unittest.TestCase):
         # Resolved by label: the row's position depends on what the summary
         # covers, not on its index in full_row_plan.
         paper_row = next(
-            row for row in rows if row[2] == "FS-1 (Cihan et al. 2022)"
+            row for row in rows if row[2] == "FS-1 (Cihan et al. 2022, as published for B-cell)"
         )
 
-        self.assertEqual(paper_row[2], "FS-1 (Cihan et al. 2022)")
+        self.assertEqual(paper_row[2], "FS-1 (Cihan et al. 2022, as published for B-cell)")
         self.assertEqual(paper_row[3], "0.6100 ± 0.0300")
         self.assertEqual(paper_row[10], "FALSE")
 

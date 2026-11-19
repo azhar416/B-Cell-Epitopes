@@ -57,7 +57,8 @@ class InternalLayoutTests(unittest.TestCase):
         for model in MODELS:
             for combination in FEATURE_COMBINATION_ORDER:
                 rows.append(_run(model, "proposed", combination))
-            for paper in ("perbandingan_1", "perbandingan_2", "perbandingan_3"):
+            for paper in ("perbandingan_1", "perbandingan_1b",
+                          "perbandingan_2", "perbandingan_3"):
                 rows.append(_run(model, paper, None))
         return rows
 
@@ -82,8 +83,8 @@ class InternalLayoutTests(unittest.TestCase):
             path = _write(directory, self._full_sweep())
             table = build_internal_table(read_summaries([path]))
 
-        # one row per model per (15 power-set + 3 paper feature sets).
-        self.assertEqual(len(table), 18 * len(MODELS))
+        # one row per model per (15 power-set + 4 paper feature sets).
+        self.assertEqual(len(table), 19 * len(MODELS))
         self.assertEqual(len({len(row) for row in table}), 1)
         self.assertEqual(len(table[0]), 9)
         # Unlike the comparison layout, the label is never blanked out.
@@ -102,7 +103,7 @@ class InternalLayoutTests(unittest.TestCase):
                 "AAC + PROP + LEN",
                 "AAC + FLANK + LEN",
                 "AAC + PROP + FLANK + LEN",
-                "PROP + LEN (= FS-1 less its duplicate column)",
+                "PROP + LEN (= FS-1b less its duplicate column)",
                 "PROP + FLANK + LEN",
                 "FLANK + LEN",
                 "AAC + DPC + LEN",
@@ -144,7 +145,7 @@ class InternalLayoutTests(unittest.TestCase):
 
         notes = [row[1] for row in table]
         self.assertEqual(len(table), 16)
-        self.assertIn("FS-1 (Cihan et al. 2022)", notes)
+        self.assertIn("FS-1 (Cihan et al. 2022, as published for B-cell)", notes)
         self.assertNotIn("FS-4 (Liu et al. 2024)", notes)
         self.assertNotIn("FS-5 (BLMPred 2026)", notes)
 

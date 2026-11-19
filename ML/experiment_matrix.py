@@ -95,6 +95,7 @@ def environment_record() -> dict[str, str]:
 FEATURE_SETS = (
     "proposed",
     "perbandingan_1",
+    "perbandingan_1b",
     "perbandingan_2",
     "perbandingan_3",
 )
@@ -105,6 +106,7 @@ FEATURE_SETS = (
 # through comparison_feature_sets, which runs it on its own.
 COMPARISON_FEATURE_SETS = (
     "perbandingan_1",
+    "perbandingan_1b",
     "perbandingan_2",
     "perbandingan_3",
     "perbandingan_4",
@@ -228,19 +230,21 @@ CONTRAST_COMBINATIONS = tuple(_contrast_combinations())
 # paper a point on our own ladder rather than an external baseline and checks
 # the fixed-profile code path against the group switches.
 #
-# FS-1 is not here. Its paper drops protein_length and the four protein-level
-# descriptors, so what remains is the four propensity scales plus peptide
-# length -- that is PAPER_PATH_START itself, a part-1 combination, plus a
-# "position" column that duplicates peptide length on this data.
+# FS-1 as published for B-cell keeps the four protein-level descriptors and
+# protein_length, so it lands two rungs up the ladder rather than off it. Its
+# peptide-only variant, FS-1b, is PAPER_PATH_START itself.
 #
 # FS-3 is not here either: RFE kept subsets of PROP and PROTGLOBAL rather than
 # whole groups, and added the label-encoded protein id, so no union of groups
 # reproduces it.
 PAPER_RECONSTRUCTIONS = {
+    "perbandingan_1": canonical(
+        PAPER_PATH_START + ("protglobal", "protlen")
+    ),
     "perbandingan_2": canonical(PAPER_PATH_START + ("protglobal",)),
 }
-# What FS-1 reduces to once its own feature engineering is applied. It sits in
-# part 1, not on the ladder.
+# What FS-1b reduces to once the SARS-CoV feature engineering is applied. It
+# sits in part 1, not on the ladder.
 PAPER_1_EQUIVALENT = canonical(PAPER_PATH_START)
 if any(
     combination not in CONTRAST_COMBINATIONS

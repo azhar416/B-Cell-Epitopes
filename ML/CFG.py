@@ -201,13 +201,14 @@ class CFG:
     def validate(self) -> None:
         if not isinstance(self.FEATURE_SET, str):
             raise ValueError(
-                "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-                "'kontras', or 'proposed'."
+                "FEATURE_SET must be 'perbandingan_1', 'perbandingan_1b', "
+                "'perbandingan_2', 'perbandingan_3', 'perbandingan_4', "
+                "'perbandingan_5', 'kontras', or 'proposed'."
             )
         self.FEATURE_SET = self.FEATURE_SET.strip().lower().replace(" ", "_")
         if self.FEATURE_SET not in {
             "perbandingan_1",
+            "perbandingan_1b",
             "perbandingan_2",
             "perbandingan_3",
             "perbandingan_4",
@@ -216,9 +217,9 @@ class CFG:
             "proposed",
         }:
             raise ValueError(
-                "FEATURE_SET must be 'perbandingan_1', 'perbandingan_2', "
-                "'perbandingan_3', 'perbandingan_4', 'perbandingan_5', "
-                "'kontras', or 'proposed'."
+                "FEATURE_SET must be 'perbandingan_1', 'perbandingan_1b', "
+                "'perbandingan_2', 'perbandingan_3', 'perbandingan_4', "
+                "'perbandingan_5', 'kontras', or 'proposed'."
             )
         if self.DATASET_NAME.lower() not in {"bcell", "sars"}:
             raise ValueError("DATASET_NAME must be either 'bcell' or 'sars'.")

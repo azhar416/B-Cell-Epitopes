@@ -114,7 +114,7 @@ CONTRAST_COMBINATION_ORDER = (
 # feature engineering is applied, which is a part-1 row rather than a rung.
 PAPER_PATH_NOTES = {
     tuple(sorted(PART2_PAPER_PATH[0])): " (= FS-2)",
-    ("len", "prop"): " (= FS-1 less its duplicate column)",
+    ("len", "prop"): " (= FS-1b less its duplicate column)",
 }
 # Group names earlier sweeps used. Kept only so a superseded summary still
 # prints; the matrix no longer produces any of them.
@@ -135,7 +135,8 @@ ALL_COMBINATION_ORDER = (
 # with the original method names would misreport those studies, so they are
 # named as feature sets.
 PAPER_LABELS = {
-    "perbandingan_1": "FS-1 (Cihan et al. 2022)",
+    "perbandingan_1": "FS-1 (Cihan et al. 2022, as published for B-cell)",
+    "perbandingan_1b": "FS-1b (Cihan et al. 2022, peptide-level only)",
     "perbandingan_2": "FS-2 (Jain et al. 2021)",
     "perbandingan_3": "FS-3 (Gurcan et al. 2025)",
     "perbandingan_4": "FS-4 (Liu et al. 2024)",
