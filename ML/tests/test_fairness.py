@@ -499,7 +499,7 @@ class SummaryTableTests(unittest.TestCase):
                 "feature_groups": "aac,len",
                 "bcell_oof_roc_auc": "0.6167",
                 "bcell_oof_std_roc_auc": "0.0269",
-                "external_sars_bcell_selected_threshold_roc_auc": "0.5884",
+                "external_sars_threshold_0_5_roc_auc": "0.5884",
             }
         }
 
@@ -575,7 +575,7 @@ class SummaryTableTests(unittest.TestCase):
                         "model_type": "random_forest",
                         "feature_set": "proposed",
                         "feature_groups": "aac,len",
-                        "external_sars_bcell_selected_threshold_roc_auc": "0.5884",
+                        "external_sars_threshold_0_5_roc_auc": "0.5884",
                     }
                 ],
             )

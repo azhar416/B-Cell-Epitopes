@@ -3,7 +3,7 @@
 The layout matches the spreadsheet used to record results: one block per model,
 internal metrics as "mean ± std" across the five folds, external SARS metrics as
 point estimates, and one row per feature combination followed by the five
-comparison papers.
+comparison papers. Both sides are scored at threshold 0.5.
 
 Typical two-phase use:
 
@@ -141,9 +141,17 @@ PAPER_LABELS = {
 }
 PAPER_ORDER = tuple(PAPER_LABELS)
 
+# The external block is reported at 0.5 because the internal block is at 0.5:
+# _internal_cell reads bcell_oof_*, which ML.train fills from folds scored at
+# config.PREDICTION_THRESHOLD. Reporting the MCC-optimised cut-off on the
+# external side while the internal side stays at 0.5 would put a tuned
+# threshold beside an untuned one in the same row, and every threshold metric
+# in the table -- accuracy, recall, precision, F1, MCC -- shifts under that
+# asymmetry. ROC-AUC and PR-AUC rank rather than cut, so they are identical
+# either way. "selected" stays available for a supplementary table.
 EXTERNAL_PREFIXES = {
-    "selected": "external_sars_bcell_selected_threshold",
     "0.5": "external_sars_threshold_0_5",
+    "selected": "external_sars_bcell_selected_threshold",
 }
 
 
@@ -199,7 +207,13 @@ def _format_mean_std(mean: float | None, std: float | None, digits: int) -> str:
 
 
 def _internal_cell(row: dict[str, Any], metric: str, digits: int) -> str:
-    """Internal metrics live under different prefixes per training mode."""
+    """Internal metrics live under different prefixes per training mode.
+
+    Either prefix is the mean over the five folds at
+    config.PREDICTION_THRESHOLD, which is 0.5. There is no internal column
+    at the MCC-optimised threshold in experiment_summary.csv, only in
+    fold_metrics.csv under validation_at_selected_threshold_*.
+    """
     for mean_key, std_key in (
         (f"bcell_oof_{metric}", f"bcell_oof_std_{metric}"),
         (f"mean_validation_{metric}", f"std_validation_{metric}"),
@@ -345,9 +359,14 @@ def build_table(
     *,
     model_order: tuple[str, ...] = DEFAULT_MODEL_ORDER,
     digits: int = 4,
-    threshold: str = "selected",
+    threshold: str = "0.5",
 ) -> list[list[str]]:
-    """Build the full table body, one list of cells per row."""
+    """Build the full table body, one list of cells per row.
+
+    Both halves of a row are at threshold 0.5 by default, so the internal
+    and external columns of one metric are comparable; see
+    EXTERNAL_PREFIXES.
+    """
     if threshold not in EXTERNAL_PREFIXES:
         raise ValueError(f"threshold must be one of {sorted(EXTERNAL_PREFIXES)}.")
 
@@ -468,10 +487,12 @@ def main() -> None:
     parser.add_argument(
         "--external-threshold",
         choices=tuple(EXTERNAL_PREFIXES),
-        default="selected",
+        default="0.5",
         help=(
-            "Which SARS threshold to report: 'selected' (MCC-optimised on "
-            "B-cell out-of-fold predictions) or '0.5'."
+            "Which SARS threshold to report: '0.5' (default, and what the "
+            "internal columns use) or 'selected' (MCC-optimised on B-cell "
+            "out-of-fold predictions, so not comparable with the internal "
+            "columns in the same row)."
         ),
     )
     parser.add_argument(

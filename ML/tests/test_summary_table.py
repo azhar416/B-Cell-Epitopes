@@ -221,7 +221,7 @@ class PublicationTableTests(unittest.TestCase):
     def _phase2_run(self, model, feature_set, feature_groups, external=0.55):
         row = _run(model, feature_set, feature_groups)
         for metric, _ in METRICS:
-            row[f"{EXTERNAL_PREFIXES['selected']}_{metric}"] = f"{external:.6f}"
+            row[f"{EXTERNAL_PREFIXES['0.5']}_{metric}"] = f"{external:.6f}"
         return row
 
     def _rows_for(self, summaries):
@@ -285,3 +285,71 @@ class PublicationTableTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][10], "FALSE")
         self.assertEqual(rows[0][11], "")
+
+
+class ReportedThresholdTests(unittest.TestCase):
+    """The published table must not mix two decision thresholds in one row.
+
+    The internal columns are the fold mean at config.PREDICTION_THRESHOLD,
+    which is 0.5; the external columns used to default to the threshold that
+    maximises MCC on the B-cell out-of-fold scores. Every threshold metric --
+    accuracy, recall, precision, F1, MCC -- then compared a tuned cut-off
+    against an untuned one across the same row.
+    """
+
+    def _row(self, *, at_05, at_selected):
+        row = {
+            "experiment_id": "proposed__random_forest__prop__len",
+            "status": "success",
+            "model_type": "random_forest",
+            "feature_set": "proposed",
+            "feature_groups": "prop,len",
+        }
+        for metric, _ in METRICS:
+            row[f"bcell_oof_{metric}"] = "0.610000"
+            row[f"bcell_oof_std_{metric}"] = "0.030000"
+            row[f"{EXTERNAL_PREFIXES['0.5']}_{metric}"] = f"{at_05:.6f}"
+            row[f"{EXTERNAL_PREFIXES['selected']}_{metric}"] = f"{at_selected:.6f}"
+        return row
+
+    def test_the_external_block_is_reported_at_threshold_0_5(self):
+        summaries = {"a": self._row(at_05=0.5100, at_selected=0.7700)}
+
+        rows = build_table(summaries, model_order=("random_forest",))
+
+        self.assertEqual(len(rows), 1)
+        # Columns 11 onwards are the external block, one cell per metric.
+        self.assertEqual(rows[0][11:], ["0.5100"] * len(METRICS))
+
+    def test_the_selected_threshold_is_still_reachable_for_a_supplement(self):
+        summaries = {"a": self._row(at_05=0.5100, at_selected=0.7700)}
+
+        rows = build_table(
+            summaries, model_order=("random_forest",), threshold="selected"
+        )
+
+        self.assertEqual(rows[0][11:], ["0.7700"] * len(METRICS))
+
+    def test_a_summary_with_only_selected_columns_reports_no_external_numbers(self):
+        """Silence is the right answer, not the tuned number under a 0.5 header.
+
+        A phase 2 sweep from before this change carries only the selected
+        columns. Falling back to them would reintroduce the mix without
+        anything in the table saying so.
+        """
+        row = self._row(at_05=0.5100, at_selected=0.7700)
+        for metric, _ in METRICS:
+            del row[f"{EXTERNAL_PREFIXES['0.5']}_{metric}"]
+
+        rows = build_table({"a": row}, model_order=("random_forest",))
+
+        self.assertEqual(rows[0][10], "FALSE")
+        self.assertEqual(rows[0][11:], [""] * len(METRICS))
+
+    def test_an_unknown_threshold_name_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_table({}, model_order=("random_forest",), threshold="0.4")
+
+
+if __name__ == "__main__":
+    unittest.main()
