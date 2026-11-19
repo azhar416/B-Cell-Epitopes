@@ -1,5 +1,5 @@
 {
-  "frozen_at": "2026-11-17T22:33:35.655235+00:00",
+  "frozen_at": "2026-11-19T00:40:48.878427+00:00",
   "rule": "one_standard_error",
   "rule_reference": "Hastie & Tibshirani, Elements of Statistical Learning, 7.10",
   "n_folds": 5,
@@ -34,41 +34,53 @@
   ],
   "selected_label": "PROP + LEN",
   "selected_n_features": 5,
-  "selected_mean": 0.6300230228850331,
-  "selected_std": 0.024132174271302122,
-  "best_mean": 0.6300230228850331,
+  "selected_mean": 0.5999738216442565,
+  "selected_std": 0.045963893881616175,
+  "best_mean": 0.5999738216442565,
   "best_label": "PROP + LEN",
-  "standard_error": 0.0107922364231006,
-  "one_se_threshold": 0.6192307864619325,
+  "standard_error": 0.020555678245976088,
+  "one_se_threshold": 0.5794181433982805,
   "within_one_se": [
     {
       "label": "PROP + LEN",
       "n_features": 5,
-      "mean": 0.6300230228850331,
-      "std": 0.024132174271302122
+      "mean": 0.5999738216442565,
+      "std": 0.045963893881616175
     },
     {
       "label": "AAC + PROP + LEN",
       "n_features": 25,
-      "mean": 0.6194580450938729,
-      "std": 0.030070737035061558
+      "mean": 0.583272810159779,
+      "std": 0.03297288423182659
     },
     {
       "label": "PROP + FLANK + LEN",
       "n_features": 47,
-      "mean": 0.6282335705627597,
-      "std": 0.024663163654518396
+      "mean": 0.5992856809046441,
+      "std": 0.03439947533445005
+    },
+    {
+      "label": "AAC + FLANK + LEN",
+      "n_features": 63,
+      "mean": 0.5823545060366091,
+      "std": 0.03380106391432856
     },
     {
       "label": "AAC + PROP + FLANK + LEN",
       "n_features": 67,
-      "mean": 0.6265675279193323,
-      "std": 0.027247666279254172
+      "mean": 0.5924574218696437,
+      "std": 0.030366991139258247
+    },
+    {
+      "label": "DPC + PROP + FLANK + LEN",
+      "n_features": 447,
+      "mean": 0.5813561780208375,
+      "std": 0.023747188828706158
     }
   ],
   "per_model_choice": {
     "extra_trees": "PROP + LEN",
-    "logistic_regression": "PROP + LEN",
+    "logistic_regression": "PROP + FLANK + LEN",
     "random_forest": "PROP + LEN",
     "xgboost": "PROP + LEN"
   },
