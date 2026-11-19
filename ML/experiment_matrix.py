@@ -122,11 +122,14 @@ GROUPED_FEATURE_SETS = ("proposed", "kontras")
 # fit, which put phase 1 past Kaggle's 12 h session cap. CFG and model.py still
 # support it, and HYPERPARAMETER_TUNING_CANDIDATES still holds its grid, so it
 # can be restored by adding it back to this tuple.
+# The MLP is the one member that runs without imbalance handling; see the
+# note on MLP_HIDDEN_LAYER_SIZES in ML.CFG for why, and report it.
 MODEL_TYPES = (
     "random_forest",
     "logistic_regression",
     "extra_trees",
     "xgboost",
+    "mlp",
 )
 # Every group the matrix can switch on, with the CFG flag that enables it.
 # The order here is canonical: it fixes the column order of every combination

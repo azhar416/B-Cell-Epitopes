@@ -24,6 +24,7 @@ from ML.experiment_matrix import (
     PAPER_PATH_START,
     PAPER_1_EQUIVALENT,
     PAPER_RECONSTRUCTIONS,
+    MODEL_TYPES,
     PROTEIN_GROUPS,
     REPRODUCTION_CHECK_COMBINATIONS,
     ExperimentSpec,
@@ -269,12 +270,16 @@ class MatrixShapeTests(unittest.TestCase):
     def test_full_sweep_is_thirty_one_configurations_per_model(self):
         specs = build_experiment_matrix()
 
-        self.assertEqual(len(specs), 124)
+        self.assertEqual(len(specs), 31 * len(MODEL_TYPES))
         counts = {name: 0 for name in ("proposed", "kontras")}
         for spec in specs:
             if spec.feature_set in counts:
                 counts[spec.feature_set] += 1
-        self.assertEqual(counts, {"proposed": 60, "kontras": 52})
+        # 15 power-set and 13 contrast combinations, once per model.
+        models = len(MODEL_TYPES)
+        self.assertEqual(
+            counts, {"proposed": 15 * models, "kontras": 13 * models}
+        )
 
     def test_the_matrix_switches_flank_on_and_leaves_protein_off(self):
         configured = _configure_run(

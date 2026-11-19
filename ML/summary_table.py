@@ -43,6 +43,7 @@ MODEL_LABELS = {
     "svm": "SVM",
     "logistic_regression": "LR",
     "extra_trees": "ET",
+    "mlp": "MLP",
 }
 # Must match ML.experiment_matrix.MODEL_TYPES. SVM is no longer swept; its
 # label stays in MODEL_LABELS so an earlier summary still renders.
@@ -51,6 +52,7 @@ DEFAULT_MODEL_ORDER = (
     "logistic_regression",
     "extra_trees",
     "xgboost",
+    "mlp",
 )
 
 GROUP_LABELS = {

@@ -7,7 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ML.experiment_matrix import build_experiment_matrix
+from ML.experiment_matrix import MODEL_TYPES, build_experiment_matrix
 from ML.pre_dataset import build_feature_frame
 from ML.experiment_matrix import (
     ALL_COMBINATIONS,
@@ -418,10 +418,11 @@ class FrozenCombinationRunTests(unittest.TestCase):
         proposed = [spec for spec in specs if spec.feature_set == "proposed"]
         baselines = [spec for spec in specs if spec.feature_set != "proposed"]
 
-        # 4 models x (1 frozen combination + 3 paper feature sets).
-        self.assertEqual(len(specs), 16)
-        self.assertEqual(len(proposed), 4)
-        self.assertEqual(len(baselines), 12)
+        # every model x (1 frozen combination + 3 paper feature sets).
+        models = len(MODEL_TYPES)
+        self.assertEqual(len(specs), 4 * models)
+        self.assertEqual(len(proposed), models)
+        self.assertEqual(len(baselines), 3 * models)
         self.assertEqual(
             {spec.feature_groups for spec in proposed}, {("aac", "prop", "len")}
         )

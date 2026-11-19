@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ML.summary_table import (
+    DEFAULT_MODEL_ORDER,
     EXTERNAL_PREFIXES,
     FEATURE_COMBINATION_ORDER,
     SUPERSEDED_COMBINATION_ORDER,
@@ -17,7 +18,10 @@ from ML.summary_table import (
     render_rows_tsv,
 )
 
-MODELS = ("random_forest", "logistic_regression", "extra_trees", "xgboost")
+# Mirror the real order rather than a copy of it: build_internal_table renders
+# one block per model in DEFAULT_MODEL_ORDER, so a fixture that covers fewer
+# models produces blank rows and the row count stops meaning anything.
+MODELS = DEFAULT_MODEL_ORDER
 
 
 def _run(model, feature_set, feature_groups, value=0.6, std=0.02):
@@ -78,8 +82,8 @@ class InternalLayoutTests(unittest.TestCase):
             path = _write(directory, self._full_sweep())
             table = build_internal_table(read_summaries([path]))
 
-        # 4 models x (15 power-set + 3 paper feature sets).
-        self.assertEqual(len(table), 72)
+        # one row per model per (15 power-set + 3 paper feature sets).
+        self.assertEqual(len(table), 18 * len(MODELS))
         self.assertEqual(len({len(row) for row in table}), 1)
         self.assertEqual(len(table[0]), 9)
         # Unlike the comparison layout, the label is never blanked out.

@@ -82,6 +82,11 @@ def _build_configured_model(config: CFG, fit_labels: np.ndarray | None = None):
         xgboost_subsample=config.XGBOOST_SUBSAMPLE,
         xgboost_colsample_bytree=config.XGBOOST_COLSAMPLE_BYTREE,
         xgboost_scale_pos_weight=scale_pos_weight,
+        mlp_hidden_layer_sizes=config.MLP_HIDDEN_LAYER_SIZES,
+        mlp_alpha=config.MLP_ALPHA,
+        mlp_learning_rate_init=config.MLP_LEARNING_RATE_INIT,
+        mlp_max_iter=config.MLP_MAX_ITER,
+        mlp_early_stopping=config.MLP_EARLY_STOPPING,
         feature_set=config.FEATURE_SET,
     )
 
@@ -94,6 +99,14 @@ def _configured_model_parameters(config: CFG) -> dict[str, object]:
         }
     if config.MODEL_TYPE == "svm":
         return {"SVM_C": config.SVM_C, "SVM_GAMMA": config.SVM_GAMMA}
+    if config.MODEL_TYPE == "mlp":
+        return {
+            "MLP_HIDDEN_LAYER_SIZES": config.MLP_HIDDEN_LAYER_SIZES,
+            "MLP_ALPHA": config.MLP_ALPHA,
+            "MLP_LEARNING_RATE_INIT": config.MLP_LEARNING_RATE_INIT,
+            "MLP_MAX_ITER": config.MLP_MAX_ITER,
+            "MLP_EARLY_STOPPING": config.MLP_EARLY_STOPPING,
+        }
     if config.MODEL_TYPE == "xgboost":
         return {
             "XGBOOST_ESTIMATORS": config.XGBOOST_ESTIMATORS,

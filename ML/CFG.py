@@ -59,6 +59,18 @@ class CFG:
     PEPTIDE_FEATURE_TYPE: str = "aac"
     VALIDATION_SIZE: float = 0.2
     RANDOM_STATE: int = 42
+    # Neural network. It is the one classifier in the sweep that runs WITHOUT
+    # imbalance handling: scikit-learn 1.6.1's MLPClassifier takes neither
+    # class_weight nor sample_weight, while the other four all run under
+    # CLASS_WEIGHT="balanced" (XGBoost through XGBOOST_SCALE_POS_WEIGHT). The
+    # development set is 10,453 negative against 3,870 positive, so expect its
+    # recall to sit below the others' and do not read that as the architecture
+    # losing. The asymmetry is unavoidable here and belongs in the manuscript.
+    MLP_HIDDEN_LAYER_SIZES: tuple[int, ...] = (100,)
+    MLP_ALPHA: float = 1e-4
+    MLP_LEARNING_RATE_INIT: float = 1e-3
+    MLP_MAX_ITER: int = 500
+    MLP_EARLY_STOPPING: bool = True
     USE_SMOTE: bool = False
     SMOTE_K_NEIGHBORS: int = 5
     MAX_PEPTIDE_LENGTH: int = 20
@@ -155,6 +167,15 @@ class CFG:
                     "XGBOOST_LEARNING_RATE": 0.03,
                 },
             ],
+            "mlp": [
+                {"MLP_HIDDEN_LAYER_SIZES": (50,)},
+                {"MLP_HIDDEN_LAYER_SIZES": (200,)},
+                {"MLP_HIDDEN_LAYER_SIZES": (100, 50)},
+                {"MLP_ALPHA": 1e-2},
+                {"MLP_ALPHA": 1.0},
+                {"MLP_LEARNING_RATE_INIT": 1e-2},
+                {"MLP_HIDDEN_LAYER_SIZES": (200, 100), "MLP_ALPHA": 1e-2},
+            ],
         }
     )
     # Set to None to allow unequal budgets (not recommended for the paper).
@@ -206,6 +227,7 @@ class CFG:
             "random_forest",
             "extra_trees",
             "xgboost",
+            "mlp",
             "svm",
         }:
             raise ValueError(
@@ -420,6 +442,13 @@ class CFG:
                 "XGBOOST_SUBSAMPLE",
                 "XGBOOST_COLSAMPLE_BYTREE",
                 "XGBOOST_SCALE_POS_WEIGHT",
+            },
+            "mlp": {
+                "MLP_HIDDEN_LAYER_SIZES",
+                "MLP_ALPHA",
+                "MLP_LEARNING_RATE_INIT",
+                "MLP_MAX_ITER",
+                "MLP_EARLY_STOPPING",
             },
         }
         for model_type, candidates in self.HYPERPARAMETER_TUNING_CANDIDATES.items():

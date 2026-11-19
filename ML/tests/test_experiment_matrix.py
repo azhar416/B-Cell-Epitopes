@@ -35,14 +35,17 @@ class ExperimentMatrixTests(unittest.TestCase):
     def test_matrix_has_all_requested_combinations(self):
         specs = build_experiment_matrix()
 
-        # 5 models x (15 power-set + 10 contrast + 2 reconstruction + 3 paper).
-        self.assertEqual(len(specs), 124)
+        # 31 configurations per model: 15 power-set, 10 contrast,
+        # 2 reconstruction, 3 paper, 1 contrast backbone.
+        self.assertEqual(len(specs), 31 * len(MODEL_TYPES))
         self.assertEqual({spec.model_type for spec in specs}, set(MODEL_TYPES))
         self.assertEqual(
             {spec.feature_set for spec in specs},
             set(FEATURE_SETS) | {"kontras"},
         )
-        self.assertEqual(len({spec.experiment_id for spec in specs}), 124)
+        self.assertEqual(
+            len({spec.experiment_id for spec in specs}), 31 * len(MODEL_TYPES)
+        )
         # Only the fixed-profile paper runs carry no groups; the contrast and
         # reconstruction arms are group-driven like the proposed arm.
         self.assertTrue(
@@ -93,7 +96,7 @@ class ExperimentMatrixTests(unittest.TestCase):
             _configure_run(base, spec, output_root).OUTPUT_DIR
             for spec in build_experiment_matrix()
         }
-        self.assertEqual(len(paths), 124)
+        self.assertEqual(len(paths), 31 * len(MODEL_TYPES))
 
     def test_comparison_profiles_keep_existing_feature_switches(self):
         base = CFG()
@@ -123,13 +126,15 @@ class ExperimentMatrixTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     rows = run_experiment_matrix(temporary_directory)
 
-            self.assertEqual(mocked_training.call_count, 124)
+            self.assertEqual(
+                mocked_training.call_count, 31 * len(MODEL_TYPES)
+            )
             self.assertTrue(all(row["status"] == "success" for row in rows))
             self.assertTrue(all(row["tuning_metric"] == "roc_auc" for row in rows))
             summary_path = Path(temporary_directory) / "experiment_summary.csv"
             with summary_path.open(newline="", encoding="utf-8") as summary_file:
                 summary_rows = list(csv.DictReader(summary_file))
-            self.assertEqual(len(summary_rows), 124)
+            self.assertEqual(len(summary_rows), 31 * len(MODEL_TYPES))
             self.assertEqual(
                 {row["status"] for row in summary_rows}, {"success"}
             )
@@ -282,11 +287,11 @@ class ComparisonProfileSelectionTests(unittest.TestCase):
         )
 
     def test_the_default_sweep_is_unchanged_by_the_new_parameter(self):
-        # The guard that matters: phase 1 ran 124 runs and its artifacts are
-        # frozen, so the default plan must not move when a profile is added to
-        # the registry.
+        # The guard that matters: phase 1's plan is 31 configurations per
+        # model and its artifacts are frozen, so the default plan must not
+        # move when a profile is added to the registry.
         specs = build_experiment_matrix()
-        self.assertEqual(len(specs), 124)
+        self.assertEqual(len(specs), 31 * len(MODEL_TYPES))
         self.assertNotIn(
             "perbandingan_5", {spec.feature_set for spec in specs}
         )

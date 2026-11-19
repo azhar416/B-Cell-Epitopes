@@ -4,6 +4,7 @@ from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -30,6 +31,11 @@ def build_model(
     xgboost_subsample: float = 1.0,
     xgboost_colsample_bytree: float = 1.0,
     xgboost_scale_pos_weight: float = 1.0,
+    mlp_hidden_layer_sizes: tuple[int, ...] = (100,),
+    mlp_alpha: float = 1e-4,
+    mlp_learning_rate_init: float = 1e-3,
+    mlp_max_iter: int = 500,
+    mlp_early_stopping: bool = True,
     feature_set: str = "proposed",
 ) -> Pipeline:
     """Build an imputer/model pipeline; scaling is used only by linear models."""
@@ -65,6 +71,19 @@ def build_model(
             n_jobs=-1,
             random_state=random_state,
         ),
+        "mlp": MLPClassifier(
+            hidden_layer_sizes=tuple(mlp_hidden_layer_sizes),
+            alpha=mlp_alpha,
+            learning_rate_init=mlp_learning_rate_init,
+            max_iter=mlp_max_iter,
+            # Stops on an internal split of the TRAINING fold, so it costs
+            # nothing in leakage and bounds the runtime, which matters: five
+            # folds times eight candidates times thirty-one combinations is
+            # over a thousand fits.
+            early_stopping=mlp_early_stopping,
+            n_iter_no_change=10,
+            random_state=random_state,
+        ),
     }
     if model_type == "xgboost":
         try:
@@ -94,7 +113,7 @@ def build_model(
         if model_type != "svm":
             raise ValueError(
                 "model_type must be logistic_regression, random_forest, "
-                "extra_trees, xgboost, or svm."
+                "extra_trees, xgboost, mlp, or svm."
             )
         svm_steps = []
         if feature_set == "perbandingan_4":
@@ -138,7 +157,9 @@ def build_model(
     if feature_set == "perbandingan_4":
         steps.append(("liu_features", LiuBertFeatureTransformer()))
     steps.append(("imputer", SimpleImputer(strategy="median", keep_empty_features=True)))
-    if model_type == "logistic_regression":
+    # Both of these are gradient-trained on raw feature magnitudes, so an
+    # unscaled column dominates. The trees are scale-free and get no scaler.
+    if model_type in {"logistic_regression", "mlp"}:
         steps.append(("scaler", StandardScaler()))
     steps.append(("classifier", classifiers[model_type]))
     return Pipeline(steps)

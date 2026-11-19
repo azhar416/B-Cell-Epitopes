@@ -14,6 +14,7 @@ import pandas as pd
 
 from ML.CFG import CFG
 from ML.experiment_matrix import (
+    MODEL_TYPES,
     _completed_report_path,
     _configure_run,
     build_experiment_matrix,
@@ -171,7 +172,9 @@ class TwoPhaseSweepTests(unittest.TestCase):
         self.assertEqual(
             len(build_experiment_matrix(("xgboost", "random_forest"))), 62
         )
-        self.assertEqual(len(build_experiment_matrix()), 124)
+        self.assertEqual(
+            len(build_experiment_matrix()), 31 * len(MODEL_TYPES)
+        )
 
     def test_unknown_model_is_rejected(self):
         with self.assertRaises(ValueError):
