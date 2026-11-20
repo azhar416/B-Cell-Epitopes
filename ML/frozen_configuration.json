@@ -1,5 +1,5 @@
 {
-  "frozen_at": "2026-11-19T00:40:48.878427+00:00",
+  "frozen_at": "2026-11-20T01:12:32.441180+00:00",
   "rule": "one_standard_error",
   "rule_reference": "Hastie & Tibshirani, Elements of Statistical Learning, 7.10",
   "n_folds": 5,
@@ -15,7 +15,8 @@
     "random_forest": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
     "logistic_regression": "[{\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}]",
     "extra_trees": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
-    "xgboost": "[{\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}]"
+    "xgboost": "[{\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}]",
+    "mlp": "[{\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}]"
   },
   "scope": "consensus",
   "source_summaries": [
@@ -24,6 +25,7 @@
   "models": [
     "extra_trees",
     "logistic_regression",
+    "mlp",
     "random_forest",
     "xgboost"
   ],
@@ -34,53 +36,30 @@
   ],
   "selected_label": "PROP + LEN",
   "selected_n_features": 5,
-  "selected_mean": 0.5999738216442565,
-  "selected_std": 0.045963893881616175,
-  "best_mean": 0.5999738216442565,
+  "selected_mean": 0.6068614020932108,
+  "selected_std": 0.043099936587212714,
+  "best_mean": 0.6068614020932108,
   "best_label": "PROP + LEN",
-  "standard_error": 0.020555678245976088,
-  "one_se_threshold": 0.5794181433982805,
+  "standard_error": 0.019274877606987584,
+  "one_se_threshold": 0.5875865244862233,
   "within_one_se": [
     {
       "label": "PROP + LEN",
       "n_features": 5,
-      "mean": 0.5999738216442565,
-      "std": 0.045963893881616175
-    },
-    {
-      "label": "AAC + PROP + LEN",
-      "n_features": 25,
-      "mean": 0.583272810159779,
-      "std": 0.03297288423182659
+      "mean": 0.6068614020932108,
+      "std": 0.043099936587212714
     },
     {
       "label": "PROP + FLANK + LEN",
       "n_features": 47,
-      "mean": 0.5992856809046441,
-      "std": 0.03439947533445005
-    },
-    {
-      "label": "AAC + FLANK + LEN",
-      "n_features": 63,
-      "mean": 0.5823545060366091,
-      "std": 0.03380106391432856
-    },
-    {
-      "label": "AAC + PROP + FLANK + LEN",
-      "n_features": 67,
-      "mean": 0.5924574218696437,
-      "std": 0.030366991139258247
-    },
-    {
-      "label": "DPC + PROP + FLANK + LEN",
-      "n_features": 447,
-      "mean": 0.5813561780208375,
-      "std": 0.023747188828706158
+      "mean": 0.5909992275765337,
+      "std": 0.03264412183583091
     }
   ],
   "per_model_choice": {
     "extra_trees": "PROP + LEN",
     "logistic_regression": "PROP + FLANK + LEN",
+    "mlp": "PROP + LEN",
     "random_forest": "PROP + LEN",
     "xgboost": "PROP + LEN"
   },
