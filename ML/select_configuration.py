@@ -5,18 +5,21 @@ configuration is mechanical rather than made after seeing which combination
 happens to win. Run it once on the phase-1 summary, commit the JSON it writes,
 and only then run phase 2.
 
-The rule (one-standard-error rule, Hastie & Tibshirani, ESL 7.10):
+The rule (highest mean, no tolerance band):
 
   1. Score every proposed feature combination by its mean metric across the
      five folds.
-  2. Take the best mean and its standard error, SE = SD / sqrt(n_folds).
-  3. Keep every combination whose mean is within one SE of the best.
-  4. Among those, choose the one with the fewest features; ties break towards
-     the smaller standard deviation.
+  2. Take the combination with the highest mean. Exact ties fall to the fewest
+     features, then to the smaller standard deviation.
+  3. Record the winner's standard error, SE = SD / sqrt(n_folds), and its
+     margin over the runner-up.
 
-Step 3 is the point: with five folds the gap between the top combinations is
-usually smaller than their own noise, so taking the plain argmax would select
-the luckiest combination rather than the best one.
+Step 3 does not change the choice; it is there to be read alongside it. With
+five folds the gap between the top combinations is often smaller than their
+own noise, in which case the top of the ranking is not stable and the winning
+margin should not be reported as a difference in performance. The JSON records
+margin_exceeds_standard_error so that question is answered in the artifact
+rather than left to the reader.
 
 Usage:
 
@@ -44,6 +47,9 @@ N_FOLDS = 5
 # carry feature_set="kontras" and are filtered out before the groups are read,
 # so no protein-level group can enter the frozen configuration.
 FEATURE_GROUPS = ("aac", "dpc", "prop", "flank", "len")
+# Only searchable with --include-protein-groups. Kept as a separate tuple so
+# the default scope cannot admit them by accident.
+PROTEIN_GROUPS = ("protglobal", "protlen", "pos", "protid")
 DISPLAY_ORDER = (
     "aac", "dpc", "prop", "flank", "len",
     "protglobal", "protlen", "pos", "protid",
@@ -135,8 +141,15 @@ def read_proposed_runs(
     metric: str,
     drop_superseded_groups: bool = False,
     skipped: dict[str, int] | None = None,
+    include_protein_groups: bool = False,
 ) -> list[dict[str, Any]]:
     """Collect successful proposed-arm runs, one record per (model, combination).
+
+    With include_protein_groups the kontras arm competes too, so protglobal,
+    protlen, pos and protid may enter the frozen configuration. They are
+    excluded by default because they are constant within a protein and so
+    identify it rather than describe the peptide; see PROTEIN_GROUPS in
+    ML.experiment_matrix for the measured intra-class correlations.
 
     Rows whose feature groups the current matrix no longer produces abort the
     read. Set drop_superseded_groups to skip them instead, which is how a
@@ -144,6 +157,12 @@ def read_proposed_runs(
     the two matrices share. Pass a dict as skipped to receive the per-group
     counts, so reuse is reported rather than silent.
     """
+    eligible = {"proposed", "kontras"} if include_protein_groups else {"proposed"}
+    searchable = tuple(
+        group for group in DISPLAY_ORDER
+        if group in set(FEATURE_GROUPS)
+        | (set(PROTEIN_GROUPS) if include_protein_groups else set())
+    )
     records: dict[tuple[str, tuple[str, ...]], dict[str, Any]] = {}
     for path in paths:
         if not path.is_file():
@@ -152,7 +171,7 @@ def read_proposed_runs(
             for row in csv.DictReader(handle):
                 if (row.get("status") or "").strip() != "success":
                     continue
-                if (row.get("feature_set") or "").strip() != "proposed":
+                if (row.get("feature_set") or "").strip() not in eligible:
                     continue
                 raw_groups = (row.get("feature_groups") or "").strip()
                 if not raw_groups or raw_groups == "profile_defined":
@@ -162,7 +181,7 @@ def read_proposed_runs(
                 # produces would collapse "aac,protein" onto "aac" and
                 # overwrite a genuine run. A superseded sweep must be
                 # rejected, not quietly merged into the current one.
-                unknown = sorted(parts.difference(FEATURE_GROUPS))
+                unknown = sorted(parts.difference(searchable))
                 if unknown and drop_superseded_groups:
                     if skipped is not None:
                         for group in unknown:
@@ -172,12 +191,16 @@ def read_proposed_runs(
                     raise ValueError(
                         f"{path} row {row.get('experiment_id')!r} uses feature "
                         f"groups {unknown} that the current matrix does not "
-                        f"produce (it has {list(FEATURE_GROUPS)}). This summary "
+                        f"produce (it has {list(searchable)}). This summary "
                         "comes from a superseded sweep and cannot be combined "
                         "with the current one. Pass --drop-superseded-groups "
                         "to use only the combinations both matrices share."
                     )
-                groups = tuple(group for group in FEATURE_GROUPS if group in parts)
+                # Must order over `searchable`, not FEATURE_GROUPS: ordering
+                # over the narrow tuple silently DROPS the protein groups, so
+                # prop,len,protglobal,protlen would collapse onto prop,len and
+                # overwrite that genuine run with another combination's score.
+                groups = tuple(group for group in searchable if group in parts)
                 pair = _metric_pair(row, metric)
                 if pair is None:
                     continue
@@ -259,31 +282,42 @@ def tuning_protocol(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _apply_one_se(
+RANKING_SHOWN = 5
+
+
+def _apply_argmax(
     candidates: list[dict[str, Any]],
     n_folds: int = N_FOLDS,
 ) -> dict[str, Any]:
-    """Apply the one-standard-error rule to scored candidates."""
+    """Select the candidate with the highest mean, with no tolerance band.
+
+    The standard error of the winner is still computed and reported, and so is
+    its margin over the runner-up, because together they say whether the win
+    is larger than the noise it was chosen out of. Neither widens the choice.
+    Exact ties fall to the fewest features, then the steadier candidate, then
+    alphabetically, so the result never depends on dict ordering.
+    """
     if not candidates:
         raise ValueError("No candidates to select from.")
-    best = max(candidates, key=lambda item: item["mean"])
-    standard_error = best["std"] / math.sqrt(n_folds)
-    threshold = best["mean"] - standard_error
-    within = [item for item in candidates if item["mean"] >= threshold]
-    # Fewest features first, then the steadier candidate, then a stable
-    # alphabetical tiebreak so the result never depends on dict ordering.
+    ranking = sorted(
+        candidates, key=lambda item: (-item["mean"], item["n_features"], item["label"])
+    )
+    best_mean = ranking[0]["mean"]
+    tied = [item for item in candidates if item["mean"] == best_mean]
     chosen = min(
-        within,
+        tied,
         key=lambda item: (item["n_features"], item["std"], item["label"]),
     )
+    behind = [item for item in ranking if item["mean"] < best_mean]
     return {
-        "best_mean": best["mean"],
-        "best_label": best["label"],
-        "standard_error": standard_error,
-        "threshold": threshold,
-        "within_one_se": sorted(
-            within, key=lambda item: (item["n_features"], item["label"])
-        ),
+        "best_mean": best_mean,
+        "best_label": chosen["label"],
+        "standard_error": chosen["std"] / math.sqrt(n_folds),
+        "runner_up_label": behind[0]["label"] if behind else None,
+        "runner_up_mean": behind[0]["mean"] if behind else None,
+        "runner_up_margin": best_mean - behind[0]["mean"] if behind else None,
+        "n_tied_at_best": len(tied),
+        "ranking": ranking[:RANKING_SHOWN],
         "chosen": chosen,
     }
 
@@ -319,7 +353,7 @@ def select_consensus(
                 },
             }
         )
-    return _apply_one_se(candidates, n_folds)
+    return _apply_argmax(candidates, n_folds)
 
 
 def select_per_model(
@@ -331,7 +365,7 @@ def select_per_model(
     for record in records:
         by_model.setdefault(record["model_type"], []).append(record)
     return {
-        model_type: _apply_one_se(entries, n_folds)
+        model_type: _apply_argmax(entries, n_folds)
         for model_type, entries in sorted(by_model.items())
     }
 
@@ -342,15 +376,30 @@ def _print_selection(title: str, result: dict[str, Any]) -> None:
         f"  terbaik           : {result['best_label']} "
         f"(mean={result['best_mean']:.4f})"
     )
-    print(
-        f"  SE / ambang 1-SE  : {result['standard_error']:.4f} / "
-        f"{result['threshold']:.4f}"
-    )
-    print(f"  dalam 1 SE        : {len(result['within_one_se'])} kombinasi")
-    for item in result["within_one_se"]:
+    print(f"  SE pemenang       : {result['standard_error']:.4f}")
+    if result["runner_up_margin"] is None:
+        print("  selisih ke-2      : -- (hanya satu kombinasi)")
+    else:
+        verdict = (
+            "di atas SE-nya"
+            if result["runner_up_margin"] > result["standard_error"]
+            else "DI BAWAH SE-nya, jadi urutan teratas tidak stabil"
+        )
+        print(
+            f"  selisih ke-2      : {result['runner_up_margin']:+.4f} "
+            f"atas {result['runner_up_label']} -- {verdict}"
+        )
+    if result["n_tied_at_best"] > 1:
+        print(
+            f"  seri di puncak    : {result['n_tied_at_best']} kombinasi, "
+            "dipecah ke fitur paling sedikit"
+        )
+    print(f"  peringkat teratas : {len(result['ranking'])} kombinasi")
+    for position, item in enumerate(result["ranking"], start=1):
         mark = "<<<" if item["label"] == result["chosen"]["label"] else "   "
         print(
-            f"    {mark} {item['label']:<28} {item['n_features']:>4} fitur  "
+            f"    {mark} {position}. {item['label']:<28} "
+            f"{item['n_features']:>4} fitur  "
             f"mean={item['mean']:.4f}  sd={item['std']:.4f}"
         )
     print(f"  TERPILIH          : {result['chosen']['label']}")
@@ -360,8 +409,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Freeze the proposed feature combination from phase-1 internal CV "
-            "using the one-standard-error rule."
+            "by taking the highest mean metric."
         )
+    )
+    parser.add_argument(
+        "--include-protein-groups",
+        action="store_true",
+        help=(
+            "Let protglobal, protlen, pos and protid compete for selection. "
+            "Off by default: they are constant within a protein, so under "
+            "protein-grouped folds they identify the protein rather than "
+            "describe the peptide."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-per-model",
+        action="store_true",
+        help=(
+            "Record each classifier's own winning combination so phase 2 can "
+            "run every model on the set it won with, instead of one shared "
+            "set for all of them."
+        ),
     )
     parser.add_argument(
         "summaries",
@@ -415,7 +483,8 @@ def main() -> None:
 
     skipped: dict[str, int] = {}
     records = read_proposed_runs(
-        args.summaries, args.metric, args.drop_superseded_groups, skipped
+        args.summaries, args.metric, args.drop_superseded_groups, skipped,
+        include_protein_groups=args.include_protein_groups,
     )
     if skipped:
         detail = ", ".join(
@@ -435,10 +504,11 @@ def main() -> None:
     combinations = {record["feature_groups"] for record in records}
     print(f"Membaca {len(records)} run proposed: "
           f"{len(models)} classifier x {len(combinations)} kombinasi")
-    if len(combinations) != 15:
+    expected_combinations = 28 if args.include_protein_groups else 15
+    if len(combinations) != expected_combinations:
         print(
-            f"PERINGATAN: ditemukan {len(combinations)} kombinasi, bukan 15. "
-            "Fase 1 mungkin belum selesai."
+            f"PERINGATAN: ditemukan {len(combinations)} kombinasi, bukan "
+            f"{expected_combinations}. Fase 1 mungkin belum selesai."
         )
 
     consensus = select_consensus(records)
@@ -452,7 +522,8 @@ def main() -> None:
     sensitivity = None
     if args.sensitivity_metric != args.metric:
         other = read_proposed_runs(
-            args.summaries, args.sensitivity_metric, args.drop_superseded_groups
+            args.summaries, args.sensitivity_metric, args.drop_superseded_groups,
+            include_protein_groups=args.include_protein_groups,
         )
         if other:
             sensitivity = select_consensus(other)
@@ -483,7 +554,7 @@ def main() -> None:
             print(
                 "  LINGKUNGAN BERBEDA -- versi pustaka menentukan pembagian fold,\n"
                 "  jadi run di bawah versi berbeda TIDAK sebanding dan tidak boleh\n"
-                "  digabung dalam satu aturan 1-SE:"
+                "  digabung dalam satu pemilihan:"
             )
             for environment in protocol["environments_seen"]:
                 print(f"    {environment}")
@@ -504,15 +575,32 @@ def main() -> None:
     # re-derives these from the same data, so they double as a check that the
     # two phases really ran one protocol.
     chosen_key = consensus["chosen"]["feature_groups"]
+    # Under --freeze-per-model each classifier runs phase 2 on its OWN
+    # combination, so its phase-1 hyperparameters must be read from that
+    # combination's run. Keying every model off the consensus combination
+    # would record settings tuned for features four of the five never see.
+    key_for = {
+        model_type: (
+            result["chosen"]["feature_groups"]
+            if args.freeze_per_model
+            else chosen_key
+        )
+        for model_type, result in per_model.items()
+    }
     phase1_hyperparameters = {
         record["model_type"]: record.get("selected_hyperparameters")
         for record in records
-        if record["feature_groups"] == chosen_key
+        if record["feature_groups"] == key_for.get(record["model_type"], chosen_key)
     }
     frozen = {
         "frozen_at": datetime.now(timezone.utc).isoformat(),
-        "rule": "one_standard_error",
-        "rule_reference": "Hastie & Tibshirani, Elements of Statistical Learning, 7.10",
+        "rule": "highest_mean",
+        "rule_reference": (
+            "Highest mean across classifiers, no tolerance band. Exact ties "
+            "fall to the fewest features. The winner's standard error and its "
+            "margin over the runner-up are recorded so the margin can be read "
+            "against the noise it was selected out of."
+        ),
         "n_folds": N_FOLDS,
         "binding_metric": args.metric,
         "phase1_tuning_metric": protocol["tuning_metric"],
@@ -533,18 +621,51 @@ def main() -> None:
         "best_mean": consensus["best_mean"],
         "best_label": consensus["best_label"],
         "standard_error": consensus["standard_error"],
-        "one_se_threshold": consensus["threshold"],
-        "within_one_se": [
+        "runner_up_label": consensus["runner_up_label"],
+        "runner_up_mean": consensus["runner_up_mean"],
+        "runner_up_margin": consensus["runner_up_margin"],
+        "margin_exceeds_standard_error": (
+            None
+            if consensus["runner_up_margin"] is None
+            else consensus["runner_up_margin"] > consensus["standard_error"]
+        ),
+        "n_tied_at_best": consensus["n_tied_at_best"],
+        "ranking": [
             {
                 "label": item["label"],
                 "n_features": item["n_features"],
                 "mean": item["mean"],
                 "std": item["std"],
             }
-            for item in consensus["within_one_se"]
+            for item in consensus["ranking"]
         ],
         "per_model_choice": {
             model_type: result["chosen"]["label"]
+            for model_type, result in per_model.items()
+        },
+        "protein_groups_searchable": args.include_protein_groups,
+        "freeze_per_model": args.freeze_per_model,
+        # Present whatever the mode, so the alternative is always visible;
+        # phase 2 only acts on it when freeze_per_model is true.
+        "per_model_feature_groups": {
+            model_type: list(result["chosen"]["feature_groups"])
+            for model_type, result in per_model.items()
+        },
+        "per_model_detail": {
+            model_type: {
+                "label": result["chosen"]["label"],
+                "n_features": result["chosen"]["n_features"],
+                "mean": result["chosen"]["mean"],
+                "std": result["chosen"]["std"],
+                "standard_error": result["standard_error"],
+                "runner_up_label": result["runner_up_label"],
+                "runner_up_margin": result["runner_up_margin"],
+                "margin_exceeds_standard_error": (
+                    None
+                    if result["runner_up_margin"] is None
+                    else result["runner_up_margin"] > result["standard_error"]
+                ),
+            }
             for model_type, result in per_model.items()
         },
         "sensitivity_metric": args.sensitivity_metric,

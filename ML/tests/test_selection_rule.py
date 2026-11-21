@@ -90,22 +90,35 @@ class FeatureCountTests(unittest.TestCase):
         self.assertEqual(combination_label(("protein", "dpc")), "DPC + PROT")
 
 
-class OneStandardErrorTests(unittest.TestCase):
-    def test_simpler_combination_wins_when_inside_one_se(self):
+class HighestMeanTests(unittest.TestCase):
+    def test_top_mean_wins_even_when_the_margin_is_inside_one_se(self):
         records = [
-            # Widest combination has the top mean but only by 0.004, while its
-            # SE is 0.05/sqrt(5) = 0.0224, so the simpler one must win.
+            # The one-standard-error rule used to hand this to the simpler
+            # combination, because 0.004 is well inside 0.05/sqrt(5)=0.0224.
+            # Under the argmax rule the top mean takes it regardless.
             _record("rf", ("aac", "prop", "flank", "len"), 0.640, 0.050),
             _record("rf", ("aac", "prop"), 0.636, 0.030),
         ]
 
         result = select_consensus(records)
 
+        self.assertEqual(result["chosen"]["label"], "AAC + PROP + FLANK + LEN")
         self.assertEqual(result["best_label"], "AAC + PROP + FLANK + LEN")
-        self.assertEqual(result["chosen"]["label"], "AAC + PROP")
-        self.assertEqual(len(result["within_one_se"]), 2)
 
-    def test_clearly_better_combination_is_kept_even_if_complex(self):
+    def test_a_margin_inside_one_se_is_flagged_as_unstable(self):
+        records = [
+            _record("rf", ("aac", "prop", "flank", "len"), 0.640, 0.050),
+            _record("rf", ("aac", "prop"), 0.636, 0.030),
+        ]
+
+        result = select_consensus(records)
+
+        self.assertAlmostEqual(result["runner_up_margin"], 0.004, places=12)
+        self.assertEqual(result["runner_up_label"], "AAC + PROP")
+        # 0.004 does not clear 0.05/sqrt(5), so the ranking is not stable.
+        self.assertLess(result["runner_up_margin"], result["standard_error"])
+
+    def test_a_margin_outside_one_se_is_not_flagged(self):
         records = [
             _record("rf", ("aac", "prop", "flank", "len"), 0.700, 0.010),
             _record("rf", ("prop",), 0.600, 0.010),
@@ -114,9 +127,9 @@ class OneStandardErrorTests(unittest.TestCase):
         result = select_consensus(records)
 
         self.assertEqual(result["chosen"]["label"], "AAC + PROP + FLANK + LEN")
-        self.assertEqual(len(result["within_one_se"]), 1)
+        self.assertGreater(result["runner_up_margin"], result["standard_error"])
 
-    def test_ties_on_size_break_towards_the_steadier_candidate(self):
+    def test_near_ties_do_not_break_towards_the_steadier_candidate(self):
         records = [
             _record("rf", ("protein",), 0.650, 0.090),
             _record("rf", ("aac",), 0.648, 0.010),
@@ -124,16 +137,29 @@ class OneStandardErrorTests(unittest.TestCase):
 
         result = select_consensus(records)
 
-        # Both are within one SE and nearly the same width, so the lower SD wins.
-        self.assertEqual(result["chosen"]["label"], "AAC")
+        # 0.650 > 0.648, so the noisier combination wins outright. Only an
+        # EXACT tie falls to the fewest features and then the lower SD.
+        self.assertEqual(result["chosen"]["label"], "PROT")
+        self.assertEqual(result["n_tied_at_best"], 1)
 
-    def test_threshold_is_mean_minus_one_standard_error(self):
+    def test_exact_ties_break_towards_fewer_features(self):
+        records = [
+            _record("rf", ("aac", "prop", "flank", "len"), 0.640, 0.010),
+            _record("rf", ("prop",), 0.640, 0.050),
+        ]
+
+        result = select_consensus(records)
+
+        self.assertEqual(result["n_tied_at_best"], 2)
+        self.assertEqual(result["chosen"]["label"], "PROP")
+
+    def test_standard_error_is_the_winners_sd_over_root_folds(self):
         records = [_record("rf", ("aac",), 0.600, 0.100)]
 
         result = select_consensus(records)
 
         self.assertAlmostEqual(result["standard_error"], 0.1 / 5**0.5, places=12)
-        self.assertAlmostEqual(result["threshold"], 0.6 - 0.1 / 5**0.5, places=12)
+        self.assertIsNone(result["runner_up_margin"])
 
     def test_consensus_averages_across_classifiers(self):
         records = [

@@ -1,7 +1,7 @@
 {
-  "frozen_at": "2026-11-20T01:12:32.441180+00:00",
-  "rule": "one_standard_error",
-  "rule_reference": "Hastie & Tibshirani, Elements of Statistical Learning, 7.10",
+  "frozen_at": "2026-11-21T00:52:14.093981+00:00",
+  "rule": "highest_mean",
+  "rule_reference": "Highest mean across classifiers, no tolerance band. Exact ties fall to the fewest features. The winner's standard error and its margin over the runner-up are recorded so the margin can be read against the noise it was selected out of.",
   "n_folds": 5,
   "binding_metric": "roc_auc",
   "phase1_tuning_metric": "roc_auc",
@@ -12,10 +12,10 @@
   ],
   "phase1_protocol_is_uniform": true,
   "phase1_selected_hyperparameters": {
-    "random_forest": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
-    "logistic_regression": "[{\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 10.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}]",
-    "extra_trees": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
-    "xgboost": "[{\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 500, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.03, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}]",
+    "random_forest": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": null, \"TREE_MIN_SAMPLES_LEAF\": 10, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
+    "logistic_regression": "[{\"LOGISTIC_REGRESSION_C\": 100.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 100.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 100.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 100.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}, {\"LOGISTIC_REGRESSION_C\": 100.0, \"LOGISTIC_REGRESSION_MAX_ITER\": 2000}]",
+    "extra_trees": "[{\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}, {\"RANDOM_FOREST_TREES\": 300, \"TREE_MAX_DEPTH\": 8, \"TREE_MIN_SAMPLES_LEAF\": 2, \"TREE_MIN_SAMPLES_SPLIT\": 2, \"TREE_MAX_FEATURES\": \"sqrt\"}]",
+    "xgboost": "[{\"XGBOOST_ESTIMATORS\": 300, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.1, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 300, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.1, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 300, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.1, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 300, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.1, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}, {\"XGBOOST_ESTIMATORS\": 300, \"XGBOOST_MAX_DEPTH\": 3, \"XGBOOST_LEARNING_RATE\": 0.1, \"XGBOOST_SUBSAMPLE\": 1.0, \"XGBOOST_COLSAMPLE_BYTREE\": 1.0, \"XGBOOST_SCALE_POS_WEIGHT\": \"balanced\"}]",
     "mlp": "[{\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}, {\"MLP_HIDDEN_LAYER_SIZES\": [200, 100], \"MLP_ALPHA\": 0.01, \"MLP_LEARNING_RATE_INIT\": 0.001, \"MLP_MAX_ITER\": 500, \"MLP_EARLY_STOPPING\": true}]"
   },
   "scope": "consensus",
@@ -29,41 +29,153 @@
     "random_forest",
     "xgboost"
   ],
-  "n_combinations_seen": 15,
+  "n_combinations_seen": 28,
   "selected_feature_groups": [
     "prop",
-    "len"
+    "len",
+    "protglobal",
+    "protlen"
   ],
-  "selected_label": "PROP + LEN",
-  "selected_n_features": 5,
-  "selected_mean": 0.6068614020932108,
-  "selected_std": 0.043099936587212714,
-  "best_mean": 0.6068614020932108,
-  "best_label": "PROP + LEN",
-  "standard_error": 0.019274877606987584,
-  "one_se_threshold": 0.5875865244862233,
-  "within_one_se": [
+  "selected_label": "PROP + LEN + PROTGLOBAL + PROTLEN",
+  "selected_n_features": 10,
+  "selected_mean": 0.6324538645523847,
+  "selected_std": 0.05448169578076117,
+  "best_mean": 0.6324538645523847,
+  "best_label": "PROP + LEN + PROTGLOBAL + PROTLEN",
+  "standard_error": 0.02436495505904909,
+  "runner_up_label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+  "runner_up_mean": 0.6323538344039028,
+  "runner_up_margin": 0.00010003014848192215,
+  "margin_exceeds_standard_error": false,
+  "n_tied_at_best": 1,
+  "ranking": [
     {
-      "label": "PROP + LEN",
-      "n_features": 5,
-      "mean": 0.6068614020932108,
-      "std": 0.043099936587212714
+      "label": "PROP + LEN + PROTGLOBAL + PROTLEN",
+      "n_features": 10,
+      "mean": 0.6324538645523847,
+      "std": 0.05448169578076117
     },
     {
-      "label": "PROP + FLANK + LEN",
-      "n_features": 47,
-      "mean": 0.5909992275765337,
-      "std": 0.03264412183583091
+      "label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+      "n_features": 13,
+      "mean": 0.6323538344039028,
+      "std": 0.05970038619293578
+    },
+    {
+      "label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS",
+      "n_features": 12,
+      "mean": 0.6257577109834432,
+      "std": 0.05082592022249867
+    },
+    {
+      "label": "AAC + PROP + FLANK + LEN + PROTGLOBAL",
+      "n_features": 71,
+      "mean": 0.6175551142204331,
+      "std": 0.043920322243007584
+    },
+    {
+      "label": "PROP + LEN + PROTGLOBAL",
+      "n_features": 9,
+      "mean": 0.611129217553471,
+      "std": 0.059092614329914694
     }
   ],
   "per_model_choice": {
-    "extra_trees": "PROP + LEN",
-    "logistic_regression": "PROP + FLANK + LEN",
+    "extra_trees": "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+    "logistic_regression": "AAC + PROP + FLANK + LEN + PROTGLOBAL",
     "mlp": "PROP + LEN",
-    "random_forest": "PROP + LEN",
-    "xgboost": "PROP + LEN"
+    "random_forest": "AAC + PROP + FLANK + LEN + PROTID",
+    "xgboost": "PROP + LEN + PROTGLOBAL + PROTLEN"
+  },
+  "protein_groups_searchable": true,
+  "freeze_per_model": true,
+  "per_model_feature_groups": {
+    "extra_trees": [
+      "prop",
+      "len",
+      "protglobal",
+      "protlen",
+      "pos",
+      "protid"
+    ],
+    "logistic_regression": [
+      "aac",
+      "prop",
+      "flank",
+      "len",
+      "protglobal"
+    ],
+    "mlp": [
+      "prop",
+      "len"
+    ],
+    "random_forest": [
+      "aac",
+      "prop",
+      "flank",
+      "len",
+      "protid"
+    ],
+    "xgboost": [
+      "prop",
+      "len",
+      "protglobal",
+      "protlen"
+    ]
+  },
+  "per_model_detail": {
+    "extra_trees": {
+      "label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+      "n_features": 13,
+      "mean": 0.6335356487758297,
+      "std": 0.022030963627348656,
+      "standard_error": 0.009852546456115387,
+      "runner_up_label": "AAC + PROP + FLANK + LEN + PROTID",
+      "runner_up_margin": 0.01677147800723444,
+      "margin_exceeds_standard_error": true
+    },
+    "logistic_regression": {
+      "label": "AAC + PROP + FLANK + LEN + PROTGLOBAL",
+      "n_features": 71,
+      "mean": 0.6240988242867058,
+      "std": 0.042808814060870996,
+      "standard_error": 0.019144683655251273,
+      "runner_up_label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS",
+      "runner_up_margin": 0.008211724484099014,
+      "margin_exceeds_standard_error": false
+    },
+    "mlp": {
+      "label": "PROP + LEN",
+      "n_features": 5,
+      "mean": 0.6344117238890278,
+      "std": 0.028936214439122684,
+      "standard_error": 0.012940668499477854,
+      "runner_up_label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS",
+      "runner_up_margin": 0.0031039678655694347,
+      "margin_exceeds_standard_error": false
+    },
+    "random_forest": {
+      "label": "AAC + PROP + FLANK + LEN + PROTID",
+      "n_features": 68,
+      "mean": 0.6544074209036329,
+      "std": 0.037978464157385615,
+      "standard_error": 0.0169844855073907,
+      "runner_up_label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+      "runner_up_margin": 0.0021634996557123864,
+      "margin_exceeds_standard_error": false
+    },
+    "xgboost": {
+      "label": "PROP + LEN + PROTGLOBAL + PROTLEN",
+      "n_features": 10,
+      "mean": 0.6711602938930398,
+      "std": 0.0480775346640877,
+      "standard_error": 0.02150092713990052,
+      "runner_up_label": "PROP + LEN + PROTGLOBAL + PROTLEN + POS",
+      "runner_up_margin": 0.011025695919869238,
+      "margin_exceeds_standard_error": false
+    }
   },
   "sensitivity_metric": "pr_auc",
-  "sensitivity_choice": "PROP + LEN",
+  "sensitivity_choice": "PROP + LEN + PROTGLOBAL + PROTLEN",
   "sensitivity_agrees": true
 }
