@@ -68,6 +68,11 @@ GROUP_LABELS = {
     "biological": "BIO",
     "protein": "PROT",
 }
+# Column order for a label built from group names. GROUP_LABELS is already in
+# manuscript order, so the labels of a combination the static plan does not
+# name read the same way as the ones it does.
+DISPLAY_ORDER = tuple(GROUP_LABELS)
+
 # Part 1, in manuscript order: AAC-first, then PROP, then FLANK, then DPC.
 # LEN is in every row, so the labels name it last rather than repeating it in
 # front. This is the only arm the selection rule reads.
@@ -88,7 +93,9 @@ FEATURE_COMBINATION_ORDER = (
     ("dpc", "prop", "flank", "len"),
     ("dpc", "flank", "len"),
 )
-# Parts 2 to 5, in that order. Reported, never selected from.
+# Parts 2 to 5, in that order. Planned as contrasts rather than selected from,
+# though a protein group may still reach the proposed arm as part of a frozen
+# configuration; see full_row_plan.
 PROTEIN_GROUPS = ("protglobal", "protlen", "pos", "protid")
 PAPER_PATH_START = ("prop", "len")
 CONTRAST_BACKBONE = ("aac", "prop", "flank", "len")
@@ -258,18 +265,42 @@ def _group_label(combination: tuple[str, ...]) -> str:
     return " + ".join(GROUP_LABELS[group] for group in combination)
 
 
-def full_row_plan() -> list[tuple[str, str, tuple[str, ...] | None]]:
+def _display_order(combination: Iterable[str]) -> tuple[str, ...]:
+    """Reorder a combination into manuscript order, dropping nothing."""
+    wanted = tuple(combination)
+    ordered = tuple(group for group in DISPLAY_ORDER if group in set(wanted))
+    unknown = tuple(group for group in wanted if group not in set(DISPLAY_ORDER))
+    return ordered + unknown
+
+
+def _proposed_row(combination: tuple[str, ...]) -> tuple[str, str, tuple[str, ...]]:
+    ordered = _display_order(combination)
+    note = PAPER_PATH_NOTES.get(tuple(sorted(ordered)), "")
+    return (_group_label(ordered) + note, "proposed", ordered)
+
+
+def full_row_plan(
+    extra_proposed: Iterable[Iterable[str]] = (),
+) -> list[tuple[str, str, tuple[str, ...] | None]]:
     """Every row the table can show, as (label, feature_set, groups).
 
     Four arms in order: the power set the selection rule works over, the
     planned contrasts, the reference sets rebuilt from our own groups, and the
     reference sets exactly as published. Superseded group names follow the
     power set so an earlier sweep still prints under its own labels.
+
+    extra_proposed names proposed-arm combinations outside that power set, so a
+    frozen configuration that includes a protein group still gets a row. The
+    static plan puts protein groups in the kontras arm only, which is where
+    they belong when the sweep plans them as contrasts; a frozen configuration
+    is in the proposed arm whatever groups it carries.
     """
     plan: list[tuple[str, str, tuple[str, ...] | None]] = []
     for combination in FEATURE_COMBINATION_ORDER:
         note = PAPER_PATH_NOTES.get(tuple(sorted(combination)), "")
         plan.append((_group_label(combination) + note, "proposed", combination))
+    for combination in extra_proposed:
+        plan.append(_proposed_row(tuple(combination)))
     for combination in SUPERSEDED_COMBINATION_ORDER:
         plan.append((_group_label(combination), "proposed", combination))
     for combination in CONTRAST_COMBINATION_ORDER:
@@ -281,13 +312,20 @@ def full_row_plan() -> list[tuple[str, str, tuple[str, ...] | None]]:
 
 
 def _rows_present(
-    summaries: dict[str, dict[str, Any]]
+    summaries: dict[str, dict[str, Any]],
+    model_type: str | None = None,
 ) -> list[tuple[str, str, tuple[str, ...] | None]]:
     """The plan restricted to rows this sweep actually covers.
 
     A sweep that ran only part of the matrix, or an earlier sweep using group
     names the matrix no longer produces, would otherwise contribute a block of
     permanently blank rows.
+
+    Passing model_type restricts it to what that one classifier covers. That
+    matters once phase 2 freezes a different combination per classifier: a
+    plan shared across models would give every model all five rows, with four
+    blank and all five labelled after whichever combination the static plan
+    happened to name.
     """
     seen = {
         (
@@ -295,10 +333,28 @@ def _rows_present(
             _combination_key(row.get("feature_groups", "")),
         )
         for row in summaries.values()
+        if model_type is None
+        or (row.get("model_type") or "").strip() == model_type
     }
+    named = {
+        (entry[1], None if entry[2] is None else tuple(sorted(entry[2])))
+        for entry in full_row_plan()
+    }
+    # Sorted so the row order never depends on dict iteration; width first
+    # keeps a frozen combination next to combinations of its own size.
+    extra = sorted(
+        (
+            combination
+            for feature_set, combination in seen
+            if feature_set == "proposed"
+            and combination is not None
+            and (feature_set, combination) not in named
+        ),
+        key=lambda combination: (len(combination), combination),
+    )
     return [
         entry
-        for entry in full_row_plan()
+        for entry in full_row_plan(extra)
         if (
             entry[1],
             None if entry[2] is None else tuple(sorted(entry[2])),
@@ -338,9 +394,9 @@ def build_internal_table(
     a spreadsheet without losing which model a row belongs to.
     """
     by_key = _index_summaries(summaries)
-    plan = _rows_present(summaries)
     rows: list[list[str]] = []
     for model_type in model_order:
+        plan = _rows_present(summaries, model_type)
         for note, row in _model_entries(by_key, model_type, plan):
             cells = [MODEL_LABELS.get(model_type, model_type), note]
             if row is None:
@@ -374,15 +430,15 @@ def build_table(
         raise ValueError(f"threshold must be one of {sorted(EXTERNAL_PREFIXES)}.")
 
     by_key = _index_summaries(summaries)
-    # Restricted the same way build_internal_table restricts it. Without this
-    # the publication table carries every row full_row_plan can name, which
-    # includes the superseded BIO/PROT combinations the matrix stopped
-    # producing: 31 permanently blank rows per model.
-    plan = _rows_present(summaries)
 
     rows: list[list[str]] = []
     for number, model_type in enumerate(model_order, start=1):
-        entries = _model_entries(by_key, model_type, plan)
+        # Restricted the same way build_internal_table restricts it. Without
+        # this the publication table carries every row full_row_plan can name,
+        # which includes the superseded BIO/PROT combinations the matrix
+        # stopped producing: 31 permanently blank rows per model. Restricted
+        # per model so a per-model freeze prints one row per classifier.
+        entries = _model_entries(by_key, model_type, _rows_present(summaries, model_type))
 
         for index, (note, row) in enumerate(entries):
             cells = [

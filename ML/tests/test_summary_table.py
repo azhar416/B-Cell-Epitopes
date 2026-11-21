@@ -210,6 +210,107 @@ class SupersededSweepTests(unittest.TestCase):
         self.assertTrue(all("PROT" not in note for note in notes))
 
 
+class PerModelFrozenRowTests(unittest.TestCase):
+    """Phase 2 may freeze a different combination per classifier.
+
+    The row plan named proposed rows only from FEATURE_COMBINATION_ORDER, the
+    peptide-level power set, and named every protein-group combination under
+    the kontras arm. A frozen configuration carrying a protein group is in the
+    PROPOSED arm, so nothing matched it: the row was dropped and the table lost
+    the configuration phase 2 was run to measure.
+    """
+
+    WINNERS = {
+        "random_forest": ("aac", "prop", "flank", "len", "protid"),
+        "logistic_regression": ("aac", "prop", "flank", "len", "protglobal"),
+        "extra_trees": ("prop", "len", "protglobal", "protlen", "pos", "protid"),
+        "xgboost": ("prop", "len", "protglobal", "protlen"),
+        "mlp": ("prop", "len"),
+    }
+    PAPERS = ("perbandingan_1", "perbandingan_1b", "perbandingan_2",
+              "perbandingan_3")
+
+    def _phase2(self, winners):
+        rows = []
+        for model, combination in winners.items():
+            rows.append(_run(model, "proposed", combination))
+            for paper in self.PAPERS:
+                rows.append(_run(model, paper, None))
+        with TemporaryDirectory() as directory:
+            return read_summaries([_write(directory, rows)])
+
+    def test_a_protein_group_in_the_proposed_arm_still_gets_a_row(self):
+        summaries = self._phase2({"xgboost": ("prop", "len", "protglobal", "protlen")})
+
+        rows = build_table(summaries, model_order=("xgboost",))
+
+        proposed = [row[2] for row in rows if not row[2].startswith("FS-")]
+        self.assertEqual(proposed, ["PROP + LEN + PROTGLOBAL + PROTLEN"])
+
+    def test_each_classifier_prints_the_combination_it_won_with(self):
+        summaries = self._phase2(self.WINNERS)
+
+        rows = build_table(summaries, model_order=tuple(self.WINNERS))
+
+        proposed = [row[2] for row in rows if not row[2].startswith("FS-")]
+        self.assertEqual(
+            proposed,
+            [
+                "AAC + PROP + FLANK + LEN + PROTID",
+                "AAC + PROP + FLANK + LEN + PROTGLOBAL",
+                "PROP + LEN + PROTGLOBAL + PROTLEN + POS + PROTID",
+                "PROP + LEN + PROTGLOBAL + PROTLEN",
+                "PROP + LEN (= FS-1b less its duplicate column)",
+            ],
+        )
+
+    def test_one_model_does_not_inherit_another_model_s_row(self):
+        """The plan is per model, so no classifier prints a blank it never ran.
+
+        With one plan shared across models, every model gained all five
+        proposed rows: four blank, and all five labelled after whichever
+        combination the static plan happened to name.
+        """
+        summaries = self._phase2(self.WINNERS)
+
+        rows = build_table(summaries, model_order=tuple(self.WINNERS))
+
+        self.assertEqual(len(rows), len(self.WINNERS) * (1 + len(self.PAPERS)))
+        for row in rows:
+            with self.subTest(note=row[2]):
+                self.assertNotEqual(row[3], "", "row has no internal metrics")
+
+    def test_group_labels_follow_manuscript_order_not_the_stored_order(self):
+        """feature_groups is read back sorted, which is not reading order."""
+        summaries = self._phase2({"random_forest": ("protid", "len", "prop", "aac")})
+
+        rows = build_table(summaries, model_order=("random_forest",))
+
+        self.assertEqual(rows[0][2], "AAC + PROP + LEN + PROTID")
+
+    def test_one_frozen_combination_for_every_model_is_unchanged(self):
+        """The consensus mode is what the pre-registered protocol describes."""
+        shared = {model: ("prop", "len") for model in self.WINNERS}
+        summaries = self._phase2(shared)
+
+        rows = build_table(summaries, model_order=tuple(self.WINNERS))
+
+        notes = [row[2] for row in rows]
+        self.assertEqual(len(rows), len(shared) * (1 + len(self.PAPERS)))
+        self.assertEqual(
+            notes.count("PROP + LEN (= FS-1b less its duplicate column)"),
+            len(shared),
+        )
+
+    def test_the_internal_layout_restricts_per_model_the_same_way(self):
+        summaries = self._phase2(self.WINNERS)
+
+        rows = build_internal_table(summaries, model_order=tuple(self.WINNERS))
+
+        self.assertEqual(len(rows), len(self.WINNERS) * (1 + len(self.PAPERS)))
+        self.assertIn("PROP + LEN + PROTGLOBAL + PROTLEN", [row[1] for row in rows])
+
+
 if __name__ == "__main__":
     unittest.main()
 
